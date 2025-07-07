@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FBR Invoice Uploader</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Basic styling for a clean and responsive interface */
+        body {
+            font-family: 'Inter', sans-serif; /* Using Inter font as per guidelines */
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5; /* Light gray background */
+            display: flex;
+            justify-content: center;
+            align-items: flex-start; /* Align to top for better content flow */
+            min-height: 100vh; /* Full viewport height */
+            box-sizing: border-box;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 12px; /* More rounded corners */
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1); /* Softer, deeper shadow */
+            max-width: 550px; /* Slightly wider container */
+            width: 100%; /* Fluid width */
+            margin-top: 40px; /* Space from top */
+            box-sizing: border-box;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50; /* Darker heading color */
+            margin-bottom: 30px;
+            font-size: 1.8em; /* Slightly larger heading */
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600; /* Bolder label text */
+            color: #34495e; /* Dark gray for labels */
+        }
+        input[type="text"],
+        input[type="file"] {
+            width: calc(100% - 24px); /* Account for padding */
+            padding: 12px;
+            margin-bottom: 25px; /* More space between inputs */
+            border: 1px solid #ced4da; /* Light border */
+            border-radius: 8px; /* Rounded input fields */
+            font-size: 1em;
+            box-sizing: border-box; /* Include padding in width */
+        }
+        input[type="file"] {
+            padding: 10px; /* Adjust padding for file input */
+        }
+        input[type="submit"] {
+            background-color: #28a745; /* Green submit button */
+            color: white;
+            padding: 14px 25px; /* Larger padding for button */
+            border: none;
+            border-radius: 8px; /* Rounded button */
+            cursor: pointer;
+            font-size: 1.1em; /* Larger font for button */
+            font-weight: 700; /* Bold button text */
+            width: 100%;
+            transition: background-color 0.3s ease, transform 0.2s ease; /* Smooth hover effect */
+            box-shadow: 0 4px 10px rgba(40, 167, 69, 0.2); /* Green shadow */
+        }
+        input[type="submit"]:hover {
+            background-color: #218838; /* Darker green on hover */
+            transform: translateY(-2px); /* Slight lift effect */
+        }
+        input[type="submit"]:active {
+            transform: translateY(0); /* Press down effect */
+            box-shadow: 0 2px 5px rgba(40, 167, 69, 0.3);
+        }
+        .message-box { /* Changed from .message to .message-box for consistency */
+            margin-top: 30px; /* More space above messages */
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 0.95em;
+            line-height: 1.5;
+            word-wrap: break-word; /* Ensure long messages wrap */
+        }
+        .message-box p {
+            margin: 5px 0; /* Space between message paragraphs */
+        }
+        .message-box.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .message-box.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        /* Responsive adjustments */
+        @media (max-width: 600px) {
+            body {
+                padding: 15px;
+            }
+            .container {
+                margin-top: 20px;
+                padding: 20px;
+            }
+            h1 {
+                font-size: 1.5em;
+            }
+            input[type="text"],
+            input[type="file"],
+            input[type="submit"] {
+                font-size: 0.95em;
+                padding: 10px;
+            }
+        }
+    </style>
+    <!-- Google Fonts for 'Inter' -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <h1>Upload FBR Invoices</h1>
+        <!-- The form for file upload and token input.
+             enctype="multipart/form-data" is essential for file uploads.
+             The 'name' attributes must match what Flask expects (e.g., request.files.get('file')). -->
+        <form method="POST" enctype="multipart/form-data">
+            <label for="token">Authorization Token:</label>
+            <input type="text" id="token" name="token" placeholder="Enter FBR API Token" required>
+            
+            <label for="file">Upload Excel File:</label>
+            <input type="file" id="file" name="file" accept=".xlsx, .xls" required>
+            
+            <input type="submit" value="Upload and Process">
+        </form>
+
+        <!-- Display messages from the Flask backend (e.g., file upload errors) -->
+        {% if messages %}
+            <div class="message-box error">
+                {% for message in messages %}
+                    <!-- The 'safe' filter is used because messages might contain HTML tags (e.g., ❌, ✅) -->
+                    <p>{{ message | safe }}</p>
+                {% endfor %}
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

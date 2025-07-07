@@ -1,0 +1,45 @@
+Flask==3.1.1
+pandas==2.3.0
+openpyxl==3.1.5
+requests==2.32.4
+fpdf==1.7.2
+qrcode==8.2
+Pillow==11.3.0
+firebase-admin==6.9.0
+gunicorn==22.0.0 # Or your desired version, ensuring it's present.
+# google-cloud-firestore and other google-cloud-* dependencies
+# are typically pulled in automatically by firebase-admin,
+# but it's good to be explicit if you encounter import errors.
+google-api-core==2.25.1
+google-auth==2.40.3
+google-auth-httplib2==0.2.0
+google-cloud-core==2.4.3
+google-cloud-firestore==2.21.0
+google-cloud-storage==3.1.1 # If using GCS, otherwise remove
+google-crc32c==1.7.1
+google-resumable-media==2.7.2
+googleapis-common-protos==1.70.0
+grpcio==1.73.1
+grpcio-status==1.73.1
+httplib2==0.22.0
+PyJWT==2.10.1
+pyasn1==0.6.1
+pyasn1_modules==0.4.2
+rsa==4.9.1
+uritemplate==4.2.0
+urllib3==2.5.0
+Werkzeug==3.1.3 # Flask dependency
+Jinja2==3.1.6 # Flask dependency
+MarkupSafe==3.1.6 # Flask dependency
+itsdangerous==2.2.0 # Flask dependency
+click==8.2.1 # Flask dependency
+charset-normalizer==3.4.2 # requests dependency
+idna==3.10 # requests dependency
+certifi==2025.6.15 # requests dependency
+# Common dependencies often pulled in by others
+numpy==2.3.1
+python-dateutil==2.9.0.post0
+pytz==2025.2
+six==1.17.0
+typing_extensions==4.14.1
+tzdata==2025.2
