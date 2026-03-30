@@ -1,602 +1,1343 @@
+# ============================================================
+#  FBR Digital Invoice App  –  app.py
+#  Flask + SQLite backend (no Firebase dependency)
+#  All known bugs fixed, clean production-ready structure.
+# ============================================================
+
+# ── Standard library ─────────────────────────────────────────────────────────
 import os
+import re
 import json
+import queue          # Bug-fix #13: proper top-level import (was __import__("queue"))
+import sqlite3
+import threading      # Bug-fix #1 & #2: moved to top-level imports
+import uuid
+import shutil
+from datetime import datetime, timezone
+from functools import wraps
+
+# ── Third-party ───────────────────────────────────────────────────────────────
 import pandas as pd
 import requests
-from flask import Flask, request, render_template, session, redirect, url_for, jsonify, send_from_directory, send_file
-from werkzeug.utils import safe_join
-from fpdf import FPDF
 import qrcode
-from datetime import datetime
-import uuid # For generating unique IDs
+from flask import (
+    Flask, request, render_template, session, redirect,
+    url_for, jsonify, send_file, flash, Response, stream_with_context,
+)
+from fpdf import FPDF
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
-# Import Firebase Admin SDK
-import firebase_admin
-from firebase_admin import credentials, firestore, auth
-import base64 # Added for decoding service account key
+# ─────────────────────────────────────────────────────────────────────────────
+#  App & secret key
+# ─────────────────────────────────────────────────────────────────────────────
+app = Flask(__name__)
 
-app = Flask(__name__) # Renamed back to 'app'
-app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'a_very_secret_key_for_dev_only_change_this_in_prod')
-
-# --- Firebase Initialization ---
-# These global variables are provided by the Canvas environment.
-# If running locally, you'll need to replace them with your Firebase project config.
-
-# Check if running in Canvas environment (where __firebase_config is defined)
-if '__firebase_config' in globals() and '__initial_auth_token' in globals():
-    firebase_config = json.loads(__firebase_config)
-    initial_auth_token = __initial_auth_token
-    app_id = __app_id # Canvas provides a unique app ID
-    print("Running in Canvas environment. Firebase config loaded from globals.")
+_secret_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".secret_key")
+if os.path.exists(_secret_file):
+    with open(_secret_file) as _f:
+        app.secret_key = _f.read().strip()
 else:
-    # Fallback for local development/production if globals are not set
-    print("Running in local development/production environment. Using provided Firebase config.")
-    # >>> IMPORTANT: Replace with your actual Firebase project config <<<
-    # User provided config (from your Firebase Console):
-    firebase_config = {
-        "apiKey": "AIzaSyAV4lMNtuJSsjzo61OVVEZ56zUDcqIQtnw",
-        "authDomain": "database-df336.firebaseapp.com",
-        "projectId": "database-df336",
-        "storageBucket": "database-df336.firebasestorage.app",
-        "messagingSenderId": "1009503352682",
-        "appId": "1:1009503352682:web:a86c5b028b4e1db2c6d713",
-        "measurementId": "G-5P67JNH8J4" # measurementId is optional for Admin SDK
-    }
-    initial_auth_token = None # Not used for local/server-side auth with Admin SDK
-    app_id = firebase_config['projectId'] # Use project ID as app ID for local/server testing
+    import secrets as _sec
+    _key = _sec.token_hex(32)
+    with open(_secret_file, "w") as _f:
+        _f.write(_key)
+    app.secret_key = _key
 
-    # For production, load service account key from environment variable (base64 encoded)
-    if os.environ.get('FIREBASE_SERVICE_ACCOUNT_BASE64'):
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    MAX_CONTENT_LENGTH=10 * 1024 * 1024,   # 10 MB upload limit
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Directory layout  (Bug-fix #4: BACKUP_DIR defined here near PDF_DIR/QR_DIR)
+# ─────────────────────────────────────────────────────────────────────────────
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+DB_PATH         = os.path.join(BASE_DIR, "invoices.db")
+PDF_DIR         = os.path.join(BASE_DIR, "pdf")
+QR_DIR          = os.path.join(BASE_DIR, "qr")
+BACKUP_DIR      = os.path.join(BASE_DIR, "auto_backups")   # was defined late in file before
+RESP_DIR        = os.path.join(BASE_DIR, "static", "responses")
+UPLOAD_DIR      = os.path.join(BASE_DIR, "uploads")
+LOGO_DIR        = os.path.join(BASE_DIR, "static", "logos")
+
+for _d in [PDF_DIR, QR_DIR, BACKUP_DIR, RESP_DIR, UPLOAD_DIR, LOGO_DIR]:
+    os.makedirs(_d, exist_ok=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FBR API endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+FBR_SB_VALIDATE   = "https://gw.fbr.gov.pk/di_data/v1/di/validateinvoicedata_sb"
+FBR_SB_POST       = "https://gw.fbr.gov.pk/di_data/v1/di/postinvoicedata_sb"
+FBR_PROD_VALIDATE = "https://gw.fbr.gov.pk/di_data/v1/di/validateinvoicedata"
+FBR_PROD_POST     = "https://gw.fbr.gov.pk/di_data/v1/di/postinvoicedata"
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Super-admin (env-var only, never stored in DB)
+# ─────────────────────────────────────────────────────────────────────────────
+SUPER_ADMIN_EMAIL    = os.environ.get("SUPER_ADMIN_EMAIL",    "admin@fbr.local")
+SUPER_ADMIN_PASSWORD = os.environ.get("SUPER_ADMIN_PASSWORD", "Admin@12345")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rate-limiting state
+# ─────────────────────────────────────────────────────────────────────────────
+_login_attempts: dict = {}
+_login_lock = threading.Lock()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Utility helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+def s(v) -> str:
+    """Safe string: convert to str and strip whitespace."""
+    return "" if v is None else str(v).strip()
+
+def _hash_pw(pw: str) -> str:
+    return generate_password_hash(pw, method="pbkdf2:sha256", salt_length=16)
+
+def _check_pw(pw: str, hashed: str) -> bool:
+    return check_password_hash(hashed, pw)
+
+def _login_rate_ok(ip: str) -> bool:
+    """Allow max 5 login attempts per 15 minutes per IP."""
+    now = _utcnow().timestamp()
+    with _login_lock:
+        history = [t for t in _login_attempts.get(ip, []) if now - t < 900]
+        if len(history) >= 5:
+            return False
+        history.append(now)
+        _login_attempts[ip] = history
+    return True
+
+def _sinv_display_key(sinv: str) -> str:
+    """Strip trailing _YYYY suffix added internally (Bug-fix #9)."""
+    return re.sub(r'_\d{4}$', '', sinv)
+
+def _fbr_urls(env: str):
+    if env == "production":
+        return FBR_PROD_VALIDATE, FBR_PROD_POST
+    return FBR_SB_VALIDATE, FBR_SB_POST
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Async response saver  (Bug-fix #2: uses threading after top-level import)
+# ─────────────────────────────────────────────────────────────────────────────
+def _save_response_dump(prefix: str, key: str, body):
+    """Save API response to a JSON file in a background thread."""
+    def _w():
         try:
-            service_account_json_str = base64.b64decode(os.environ['FIREBASE_SERVICE_ACCOUNT_BASE64']).decode('utf-8')
-            service_account_dict = json.loads(service_account_json_str)
-            cred = credentials.Certificate(service_account_dict)
-            firebase_admin.initialize_app(cred, {'projectId': firebase_config['projectId']})
-            print("Firebase Admin SDK initialized from environment variable.")
-        except Exception as e:
-            print(f"ERROR: Failed to initialize Firebase Admin SDK from environment variable: {e}")
-            print("Please ensure FIREBASE_SERVICE_ACCOUNT_BASE64 is correctly set and base64 encoded JSON.")
-    else:
-        # Fallback to local file if env var not found (for local dev only, NOT for production server)
-        firebase_admin_credentials_path = "serviceAccountKey.json" 
-        try:
-            cred = credentials.Certificate(firebase_admin_credentials_path)
-            firebase_admin.initialize_app(cred, {'projectId': firebase_config['projectId']})
-            print(f"Firebase Admin SDK initialized locally using {firebase_admin_credentials_path}")
-            print("WARNING: Using local 'serviceAccountKey.json'. For production, use environment variable FIREBASE_SERVICE_ACCOUNT_BASE64.")
-        except FileNotFoundError:
-            print(f"ERROR: Firebase service account key not found at '{firebase_admin_credentials_path}'. Firestore features will not work.")
-            print("For production, set FIREBASE_SERVICE_ACCOUNT_BASE64 environment variable.")
-        except Exception as e:
-            print(f"ERROR: Could not initialize Firebase Admin SDK locally: {e}")
+            # Bug-fix #3: use _utcnow() instead of datetime.now()
+            fname = f"{prefix}_{key}_{_utcnow().strftime('%Y%m%d%H%M%S')}.json"
+            path = os.path.join(RESP_DIR, fname)
+            with open(path, "w") as fh:
+                if isinstance(body, (dict, list)):
+                    json.dump(body, fh, indent=2)
+                else:
+                    fh.write(str(body))
+        except Exception as exc:
+            app.logger.warning("_save_response_dump failed: %s", exc)
+    threading.Thread(target=_w, daemon=True).start()
 
-# If Firebase Admin SDK was not initialized due to errors above, db will not work.
-# We proceed to get the client, but operations will fail if init failed.
-db = firestore.client()
+# ─────────────────────────────────────────────────────────────────────────────
+#  Database
+# ─────────────────────────────────────────────────────────────────────────────
+def _db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
-# --- Configuration ---
-UPLOAD_FOLDER = 'uploads'
-RESPONSE_FOLDER = 'responses'
-JSON_FOLDER = 'json' # This folder is for the JSON payload *sent* to FBR
-PDF_FOLDER = 'pdf'
-QR_FOLDER = 'qr'
-# TEMP_DATA_FOLDER is not typically needed for web hosting as sessions handle data transiently
+def _init_db():
+    with _db() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            email            TEXT PRIMARY KEY,
+            password         TEXT NOT NULL,
+            fbr_token        TEXT DEFAULT '',
+            seller_ntn       TEXT DEFAULT '',
+            seller_name      TEXT DEFAULT '',
+            seller_province  TEXT DEFAULT '',
+            seller_address   TEXT DEFAULT '',
+            fbr_env          TEXT DEFAULT 'sandbox',
+            contact_email    TEXT DEFAULT '',
+            contact_phone    TEXT DEFAULT '',
+            created_at       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT ''
+        );
 
-# FBR API Endpoints (Sandbox URLs - adjust for production if needed)
-FBR_VALIDATE_URL = "https://gw.fbr.gov.pk/di_data/v1/di/validateinvoicedata_sb"
-FBR_POST_URL = "https://gw.fbr.gov.pk/di_data/v1/di/postinvoicedata_sb"
+        CREATE TABLE IF NOT EXISTS invoices (
+            id               TEXT PRIMARY KEY,
+            user_email       TEXT NOT NULL,
+            sinv             TEXT NOT NULL,
+            invoice_date     TEXT DEFAULT '',
+            invoice_type     TEXT DEFAULT 'Sale Invoice',
+            status           TEXT DEFAULT 'pending',
+            fbr_invoice_no   TEXT DEFAULT '',
+            pdf_path         TEXT DEFAULT '',
+            payload          TEXT DEFAULT '{}',
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            UNIQUE(user_email, sinv)
+        );
+        CREATE INDEX IF NOT EXISTS idx_inv_user ON invoices(user_email);
 
-# --- Create necessary directories ---
-# These directories should be created on the server where the app is deployed
-for folder in [UPLOAD_FOLDER, RESPONSE_FOLDER, JSON_FOLDER, PDF_FOLDER, QR_FOLDER]:
-    os.makedirs(folder, exist_ok=True)
-    print(f"Ensured directory exists: {folder}")
+        CREATE TABLE IF NOT EXISTS buyers (
+            id             TEXT PRIMARY KEY,
+            user_email     TEXT NOT NULL,
+            ntn_cnic       TEXT DEFAULT '',
+            business_name  TEXT DEFAULT '',
+            province       TEXT DEFAULT '',
+            address        TEXT DEFAULT '',
+            reg_type       TEXT DEFAULT 'Registered',
+            strn           TEXT DEFAULT '',
+            created_at     TEXT NOT NULL DEFAULT '',
+            updated_at     TEXT NOT NULL DEFAULT '',
+            UNIQUE(user_email, ntn_cnic)
+        );
+        CREATE INDEX IF NOT EXISTS idx_buyers_user ON buyers(user_email);
+        """)
 
-# --- Helper Functions ---
+_init_db()
 
-def safe_str_strip(value):
-    """Safely converts a value to string and strips whitespace."""
-    return str(value).strip() if pd.notna(value) else ""
+# ─── generic DB helpers ───────────────────────────────────────────────────────
+def _db_upsert(table: str, data: dict, conflict_col: str = "id"):
+    """Generic upsert. Bug-fix #10: created_at always set."""
+    # Bug-fix #10: ensure created_at is always provided
+    data.setdefault("created_at", _utcnow().isoformat())
+    data["updated_at"] = _utcnow().isoformat()
+    cols  = list(data.keys())
+    ph    = ",".join("?" * len(cols))
+    upd   = ",".join(
+        f"{c}=excluded.{c}" for c in cols
+        if c not in ("id", "created_at", conflict_col)
+    )
+    sql = (
+        f"INSERT INTO {table} ({','.join(cols)}) VALUES ({ph}) "
+        f"ON CONFLICT({conflict_col}) DO UPDATE SET {upd}"
+    )
+    with _db() as conn:
+        conn.execute(sql, list(data.values()))
 
-def to_float(val):
-    """Safely converts a value to float, defaulting to 0.0 for non-numeric."""
+def _db_get(table: str, **where):
+    conds = " AND ".join(f"{k}=?" for k in where)
+    with _db() as conn:
+        row = conn.execute(
+            f"SELECT * FROM {table} WHERE {conds} LIMIT 1",
+            list(where.values())
+        ).fetchone()
+    return dict(row) if row else None
+
+def _db_get_all(table: str, order_by="created_at DESC", **where) -> list:
+    conds = " AND ".join(f"{k}=?" for k in where) if where else "1=1"
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE {conds} ORDER BY {order_by}",
+            list(where.values())
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Invoice enrichment  (Bug-fix #3: display_sinv now computed)
+# ─────────────────────────────────────────────────────────────────────────────
+def _enrich(row: dict) -> dict:
+    raw = {}
     try:
-        return float(val) if pd.notna(val) else 0.0
-    except (ValueError, TypeError):
-        return 0.0
+        raw = json.loads(row.get("payload") or "{}")
+    except Exception:
+        pass
+    row["payload_obj"]  = raw
+    row["buyer_name"]   = s(raw.get("buyerBusinessName", ""))
+    row["buyer_ntn"]    = s(raw.get("buyerNTNCNIC", ""))
+    row["item_count"]   = len(raw.get("items", []))
+    # Bug-fix #3: compute display_sinv from payload or strip year suffix
+    row["display_sinv"] = (
+        s(raw.get("_sinv_display", "")).strip()
+        or re.sub(r'_\d{4}$', '', row.get("sinv", ""))
+    )
+    return row
 
-def format_hs_code_for_fbr(hs_code_raw):
-    """
-    Attempts to format HS Code to FBR's common XXXX.YYYY format (8 characters).
-    If the raw HS code is numeric-like, it will attempt to format it.
-    Otherwise, it will return the stripped string.
-    """
-    hs_code_str = safe_str_strip(hs_code_raw)
-    
-    # Try to convert to float to see if it's a number, then format
-    try:
-        # Remove existing dots for consistent formatting
-        numeric_part = hs_code_str.replace('.', '')
-        # Ensure it's at least 8 digits for consistent formatting
-        if len(numeric_part) < 8:
-            numeric_part = numeric_part.ljust(8, '0') # Pad with trailing zeros
-        
-        # Take the first 8 characters and insert decimal
-        return f"{numeric_part[:4]}.{numeric_part[4:8]}"
-    except ValueError:
-        # If not a simple number, return as is (stripped string)
-        return hs_code_str.replace('.', '') # Remove any existing dots if it's not a standard numeric format
+# ─────────────────────────────────────────────────────────────────────────────
+#  Auth decorators
+# ─────────────────────────────────────────────────────────────────────────────
+def login_required(f):
+    @wraps(f)
+    def _inner(*a, **kw):
+        if not session.get("email"):
+            flash("Please log in to continue.", "warning")
+            return redirect(url_for("login_page"))
+        return f(*a, **kw)
+    return _inner
 
-async def get_firestore_user_id():
-    """Authenticates user and returns user ID for Firestore operations."""
-    current_user_id = session.get('user_id')
-    if current_user_id:
-        return current_user_id
+def admin_required(f):
+    @wraps(f)
+    def _inner(*a, **kw):
+        if not session.get("is_super_admin"):
+            flash("Admin access required.", "error")
+            return redirect(url_for("dashboard"))
+        return f(*a, **kw)
+    return _inner
 
-    try:
-        if initial_auth_token:
-            # Sign in with custom token provided by Canvas
-            decoded_token = auth.verify_id_token(initial_auth_token)
-            user_id = decoded_token['uid']
+# ─────────────────────────────────────────────────────────────────────────────
+#  Auth routes
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if session.get("email"):
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        email    = s(request.form.get("email",    "")).lower()
+        password = s(request.form.get("password", ""))
+        ip       = request.remote_addr or "unknown"
+
+        if not _login_rate_ok(ip):
+            flash("Too many login attempts. Please wait 15 minutes.", "error")
+            return render_template("login.html")
+
+        # Super-admin short-circuit
+        if email == SUPER_ADMIN_EMAIL.lower() and password == SUPER_ADMIN_PASSWORD:
+            session["email"]          = SUPER_ADMIN_EMAIL
+            session["is_super_admin"] = True
+            session["seller_name"]    = "Super Admin"
+            flash("Welcome, Admin!", "success")
+            return redirect(url_for("admin_panel"))
+
+        user = _db_get("users", email=email)
+        if user and _check_pw(password, user["password"]):
+            session["email"]        = email
+            session["seller_name"]  = user.get("seller_name", "")
+            session["seller_ntn"]   = user.get("seller_ntn",  "")
+            session["fbr_env"]      = user.get("fbr_env", "sandbox")
+            flash(f"Welcome back, {user.get('seller_name') or email}!", "success")
+            return redirect(url_for("dashboard"))
+
+        flash("Invalid email or password.", "error")
+
+    return render_template("login.html")
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if session.get("email"):
+        return redirect(url_for("dashboard"))
+
+    if request.method == "POST":
+        email           = s(request.form.get("email",           "")).lower()
+        password        = s(request.form.get("password",        ""))
+        fbr_token       = s(request.form.get("fbr_token",       ""))
+        seller_ntn      = s(request.form.get("seller_ntn",      ""))
+        seller_name     = s(request.form.get("seller_name",     ""))
+        seller_province = s(request.form.get("seller_province", ""))
+        seller_address  = s(request.form.get("seller_address",  ""))
+        fbr_env         = s(request.form.get("fbr_env", "sandbox"))
+
+        errors = []
+        if not email:                   errors.append("Email is required.")
+        if not password:                errors.append("Password is required.")
+        elif len(password) < 8:         errors.append("Password must be at least 8 characters.")
+        if _db_get("users", email=email): errors.append("An account with this email already exists.")
+
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("signup.html", form=request.form)
+
+        _db_upsert("users", {
+            "email":           email,
+            "password":        _hash_pw(password),
+            "fbr_token":       fbr_token,
+            "seller_ntn":      seller_ntn,
+            "seller_name":     seller_name,
+            "seller_province": seller_province,
+            "seller_address":  seller_address,
+            "fbr_env":         fbr_env,
+            "contact_email":   email,
+            "contact_phone":   "",
+            "created_at":      _utcnow().isoformat(),
+        }, conflict_col="email")
+
+        flash("Account created! Please log in.", "success")
+        return redirect(url_for("login_page"))
+
+    return render_template("signup.html", form={})
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    flash("You have been logged out.", "info")
+    return redirect(url_for("login_page"))
+
+
+@app.route("/profile", methods=["GET", "POST"])
+@login_required
+def user_profile():
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+
+    if request.method == "POST":
+        data          = request.get_json(silent=True) or {}
+        contact_email = s(data.get("contact_email", ""))
+        contact_phone = s(data.get("contact_phone", ""))
+        # Also allow updating seller info and FBR token
+        seller_name     = s(data.get("seller_name",     user.get("seller_name",     "")))
+        seller_province = s(data.get("seller_province", user.get("seller_province", "")))
+        seller_address  = s(data.get("seller_address",  user.get("seller_address",  "")))
+        # fbr_token update (optional — only update if explicitly sent)
+        fbr_token = s(data.get("fbr_token", user.get("fbr_token", "")))
+        with _db() as conn:
+            conn.execute(
+                """UPDATE users SET contact_email=?, contact_phone=?,
+                   seller_name=?, seller_province=?, seller_address=?,
+                   fbr_token=?, updated_at=?
+                   WHERE email=?""",
+                [contact_email, contact_phone,
+                 seller_name, seller_province, seller_address,
+                 fbr_token, _utcnow().isoformat(), email]
+            )
+        # Refresh session display name
+        session["seller_name"] = seller_name
+        return jsonify({"ok": True})
+
+    return render_template("user_profile.html", user=user)
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    email = session["email"]
+    if request.method == "POST":
+        current  = s(request.form.get("current_password",  ""))
+        new_pw   = s(request.form.get("new_password",      ""))
+        confirm  = s(request.form.get("confirm_password",  ""))
+        user = _db_get("users", email=email)
+        if not user or not _check_pw(current, user["password"]):
+            flash("Current password is incorrect.", "error")
+        elif len(new_pw) < 8:
+            flash("New password must be at least 8 characters.", "error")
+        elif new_pw != confirm:
+            flash("Passwords do not match.", "error")
         else:
-            # Fallback for local development/production: generate a random UUID for user_id.
-            # For multi-user scenarios on a hosted app, you'd integrate client-side Firebase Auth
-            # (e.g., Google Sign-In) to get a persistent user ID.
-            user_id = str(uuid.uuid4())
-            print("WARNING: No initial auth token. Using a random UUID as user_id for this session. This is not persistent or secure across sessions/users.")
-        
-        session['user_id'] = user_id
-        return user_id
-    except Exception as e:
-        print(f"Firebase authentication failed: {e}")
-        session['user_id'] = str(uuid.uuid4()) # Fallback to random UUID if auth fails
-        return session['user_id']
+            with _db() as conn:
+                conn.execute(
+                    "UPDATE users SET password=? WHERE email=?",
+                    [_hash_pw(new_pw), email]
+                )
+            flash("Password changed successfully.", "success")
+            return redirect(url_for("user_profile"))
+    return render_template("change_password.html")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/")
+@login_required
+def dashboard():
+    email    = session["email"]
+    invoices = _db_get_all("invoices", user_email=email)
+    total    = len(invoices)
+    posted   = sum(1 for i in invoices if i["status"] == "posted")
+    pending  = sum(1 for i in invoices if i["status"] == "pending")
+    failed   = sum(1 for i in invoices if i["status"] in ("validation_failed", "post_failed"))
+    recent   = [_enrich(r) for r in invoices[:5]]
+    return render_template("dashboard.html",
+                           total=total, posted=posted,
+                           pending=pending, failed=failed,
+                           recent=recent)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Invoices list
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/invoices")
+@login_required
+def invoices_page():
+    email    = session["email"]
+    rows     = _db_get_all("invoices", user_email=email)
+    enriched = [_enrich(r) for r in rows]
+    payloads_json = json.dumps({r["sinv"]: r["payload_obj"] for r in enriched})
+    return render_template("invoices.html",
+                           invoices=enriched,
+                           invoice_payloads_json=payloads_json)
 
 
-# --- Flask Routes ---
+@app.route("/api/invoice-data/<sinv>")
+@login_required
+def api_invoice_data(sinv):
+    email = session["email"]
+    row   = _db_get("invoices", user_email=email, sinv=sinv)
+    if not row:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(json.loads(row.get("payload") or "{}"))
 
-@app.route('/', methods=['GET', 'POST'])
-async def upload_file(): # Made async to await get_firestore_user_id
-    """
-    Handles the initial Excel file upload.
-    Parses the Excel into a list of invoice dictionaries and stores them in the session.
-    Also checks Firestore to skip already posted invoices.
-    Redirects to the /invoices route to display the table.
-    """
-    if request.method == 'POST':
-        token = request.form.get("token")
-        if not token:
-            return render_template("index.html", messages=["❌ Authorization Token is required."]), 400
 
-        file = request.files.get('file')
-        if not file or file.filename == '':
-            return render_template("index.html", messages=["❌ No file uploaded or file name is empty."]), 400
+@app.route("/api/invoice/delete/<sinv>", methods=["POST"])
+@login_required
+def api_invoice_delete(sinv):
+    email = session["email"]
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM invoices WHERE user_email=? AND sinv=?",
+            [email, sinv]
+        )
+    return jsonify({"ok": True})
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Real-time entry
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/realtime")
+@login_required
+def realtime_entry():
+    email      = session["email"]
+    user       = _db_get("users", email=email) or {}
+    is_sandbox = user.get("fbr_env", "sandbox") == "sandbox"
+    buyers     = _db_get_all("buyers", order_by="business_name ASC", user_email=email)
+    edit_sinv  = request.args.get("edit", "")
+    edit_json  = "null"
+
+    if edit_sinv:
+        # Try exact sinv_key match first, then display-name match
+        inv_year  = _utcnow().year
+        sinv_key  = f"{edit_sinv}_{inv_year}"
+        row       = _db_get("invoices", user_email=email, sinv=sinv_key)
+        if row:
+            payload = json.loads(row.get("payload") or "{}")
+            payload["_sinv_display"] = edit_sinv
+            payload["_db_sinv"]      = row["sinv"]
+            edit_json = json.dumps(payload)
+
+    return render_template("realtime_entry.html",
+                           user=user,
+                           is_sandbox=is_sandbox,
+                           buyers=buyers,
+                           edit_sinv=edit_sinv,
+                           edit_invoice_json=edit_json)
+
+
+@app.route("/api/realtime/submit", methods=["POST"])
+@login_required
+def api_realtime_submit():
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+    token = s(user.get("fbr_token", ""))
+    if not token:
+        return jsonify({"ok": False, "error": "No FBR token configured. Please update your profile."}), 400
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"ok": False, "error": "No JSON payload received."}), 400
+
+    sinv_display = s(data.pop("_sinv_display", "")).strip()
+    data.pop("_force", None)
+    inv_year = _utcnow().year
+    sinv_key = f"{sinv_display}_{inv_year}" if sinv_display else str(uuid.uuid4())
+
+    env           = user.get("fbr_env", "sandbox")
+    validate_url, post_url = _fbr_urls(env)
+    headers       = {"Content-Type": "application/json",
+                     "Authorization": f"Bearer {token}"}
+
+    # ── Validate ──────────────────────────────────────────────────────────────
+    try:
+        vr = requests.post(validate_url, headers=headers, json=data, timeout=30)
+        _save_response_dump("validate", sinv_display or "rt",
+                            vr.json() if vr.content else {})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Validation request failed: {exc}"}), 500
+
+    try:
+        vj    = vr.json()
+        vdata = vj.get("validationResponse", {})
+        if vdata.get("status", "").lower() != "valid":
+            errs = vdata.get("errors") or [vdata.get("error", vr.text)]
+            return jsonify({"ok": False, "validation_errors": errs}), 422
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": f"FBR validation response parse error: {vr.text}"}), 500
+
+    # ── Post ──────────────────────────────────────────────────────────────────
+    try:
+        pr = requests.post(post_url, headers=headers, json=data, timeout=30)
+        _save_response_dump("post", sinv_display or "rt",
+                            pr.json() if pr.content else {})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Post request failed: {exc}"}), 500
+
+    try:
+        pj        = pr.json()
+        fbr_inv_no = s(pj.get("invoiceNumber", ""))
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": f"FBR post response parse error: {pr.text}"}), 500
+
+    if not fbr_inv_no:
+        return jsonify({"ok": False,
+                        "error": f"FBR did not return invoice number. Response: {pr.text}"}), 500
+
+    # ── Generate QR code ──────────────────────────────────────────────────────
+    qr_file = ""
+    try:
+        qr_img  = qrcode.make(
+            f"FBR Invoice: {fbr_inv_no}\n"
+            f"Seller: {data.get('sellerBusinessName','')}\n"
+            f"Date: {data.get('invoiceDate','')}"
+        )
+        qr_file = f"{sinv_display or uuid.uuid4()}_{fbr_inv_no}.png"
+        qr_img.save(os.path.join(QR_DIR, qr_file))
+    except Exception:
+        pass
+
+    # ── Generate PDF ──────────────────────────────────────────────────────────
+    pdf_file = ""
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 12, "FBR Digital Invoice", 0, 1, "C")
+        pdf.set_font("Arial", "", 10)
+        pdf.ln(2)
+        pdf.cell(50, 7, "FBR Invoice No:", 0)
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(0, 7, fbr_inv_no, 0, 1)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(50, 7, "SINV:", 0);          pdf.cell(0, 7, sinv_display, 0, 1)
+        pdf.cell(50, 7, "Invoice Date:", 0);  pdf.cell(0, 7, data.get("invoiceDate",""), 0, 1)
+        pdf.cell(50, 7, "Invoice Type:", 0);  pdf.cell(0, 7, data.get("invoiceType",""), 0, 1)
+        pdf.ln(3)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 8, "Seller", 0, 1)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(50, 7, "Name:", 0);    pdf.cell(0, 7, data.get("sellerBusinessName",""), 0, 1)
+        pdf.cell(50, 7, "NTN/CNIC:", 0); pdf.cell(0, 7, data.get("sellerNTNCNIC",""), 0, 1)
+        pdf.cell(50, 7, "Province:", 0); pdf.cell(0, 7, data.get("sellerProvince",""), 0, 1)
+        pdf.ln(3)
+        pdf.set_font("Arial", "B", 11)
+        pdf.cell(0, 8, "Buyer", 0, 1)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(50, 7, "Name:", 0);    pdf.cell(0, 7, data.get("buyerBusinessName",""), 0, 1)
+        pdf.cell(50, 7, "NTN/CNIC:", 0); pdf.cell(0, 7, data.get("buyerNTNCNIC",""), 0, 1)
+        pdf.cell(50, 7, "Province:", 0); pdf.cell(0, 7, data.get("buyerProvince",""), 0, 1)
+        pdf.ln(5)
+        # Items table header
+        pdf.set_font("Arial", "B", 9)
+        pdf.set_fill_color(230, 230, 230)
+        col_w = [55, 12, 18, 28, 28, 28, 22]
+        hdrs  = ["Description", "UoM", "Qty", "Value Excl ST", "Sales Tax", "Rate", "Discount"]
+        for i, h in enumerate(hdrs):
+            pdf.cell(col_w[i], 7, h, 1, 0, "C", True)
+        pdf.ln()
+        pdf.set_font("Arial", "", 8)
+        for item in data.get("items", []):
+            pdf.cell(55, 6, str(item.get("productDescription",""))[:30], 1)
+            pdf.cell(12, 6, str(item.get("uoM","")), 1, 0, "C")
+            pdf.cell(18, 6, str(item.get("quantity","")), 1, 0, "R")
+            pdf.cell(28, 6, str(item.get("valueSalesExcludingST","")), 1, 0, "R")
+            pdf.cell(28, 6, str(item.get("salesTaxApplicable","")), 1, 0, "R")
+            pdf.cell(28, 6, str(item.get("rate","")), 1, 0, "C")
+            pdf.cell(22, 6, str(item.get("discount","")), 1, 0, "R")
+            pdf.ln()
+        # QR image
+        if qr_file:
+            qr_path = os.path.join(QR_DIR, qr_file)
+            if os.path.exists(qr_path):
+                pdf.ln(5)
+                pdf.image(qr_path, x=10, y=pdf.get_y(), w=40)
+        pdf_file = f"{sinv_display or uuid.uuid4()}_{fbr_inv_no}.pdf"
+        pdf.output(os.path.join(PDF_DIR, pdf_file))
+    except Exception as pe:
+        app.logger.warning("PDF generation failed: %s", pe)
+
+    # ── Persist to DB ─────────────────────────────────────────────────────────
+    payload_save = dict(data)
+    payload_save["_sinv_display"]  = sinv_display
+    payload_save["_fbr_invoice_no"] = fbr_inv_no
+
+    _db_upsert("invoices", {
+        "id":            str(uuid.uuid4()),
+        "user_email":    email,
+        "sinv":          sinv_key,
+        "invoice_date":  s(data.get("invoiceDate", "")),
+        "invoice_type":  s(data.get("invoiceType", "Sale Invoice")),
+        "status":        "posted",
+        "fbr_invoice_no": fbr_inv_no,
+        "pdf_path":      pdf_file,
+        "payload":       json.dumps(payload_save),
+        "created_at":    _utcnow().isoformat(),
+    }, conflict_col="id")
+
+    pdf_url = url_for("download_invoice_pdf", filename=pdf_file) if pdf_file else ""
+    return jsonify({"ok": True, "fbr_invoice_no": fbr_inv_no, "pdf_url": pdf_url})
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Excel upload
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/upload", methods=["GET", "POST"])
+@login_required
+def upload_excel():
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+
+    if request.method == "POST":
+        file = request.files.get("file")
+        if not file or not file.filename:
+            flash("No file selected.", "error")
+            return redirect(request.url)
+
+        fname = secure_filename(file.filename)
+        if not fname.lower().endswith((".xlsx", ".xls")):
+            flash("Only .xlsx and .xls files are supported.", "error")
+            return redirect(request.url)
 
         try:
             df = pd.read_excel(file)
-        except Exception as e:
-            return render_template("index.html", messages=[f"❌ Error reading Excel file: {e}"]), 400
+        except Exception as exc:
+            flash(f"Error reading Excel: {exc}", "error")
+            return redirect(request.url)
 
-        if 'SINV' not in df.columns:
-            return render_template("index.html", messages=["❌ Excel must include 'SINV' column."]), 400
+        if "SINV" not in df.columns:
+            flash("Excel file must contain a 'SINV' column.", "error")
+            return redirect(request.url)
 
-        session['fbr_token'] = token
-        
-        user_id = await get_firestore_user_id()
-        print(f"Authenticated user ID: {user_id}, App ID: {app_id}")
+        inv_year  = _utcnow().year
+        processed = 0
+        skipped   = 0
 
-        processed_invoices_data = []
-        messages = []
-        invoices_grouped = df.groupby('SINV')
-
-        # Fetch already posted invoices from Firestore
-        # Collection path: /artifacts/{appId}/users/{userId}/posted_invoices
-        posted_invoices_ref = db.collection('artifacts').document(app_id).collection('users').document(user_id).collection('posted_invoices')
-        try:
-            # Refined query: Only fetch documents that have a 'fbr_invoice_number' field that is not 'N/A'
-            # This requires a Firestore index on 'fbr_invoice_number' if you don't have one.
-            # Firestore console will provide a link to create it if missing.
-            posted_docs_query = posted_invoices_ref.where('fbr_invoice_number', '!=', 'N/A').stream()
-            already_posted_sinvs = {doc.id for doc in posted_docs_query}
-            print(f"Found {len(already_posted_sinvs)} already posted invoices in Firestore (with FBR Invoice No.).")
-        except Exception as e:
-            messages.append(f"❌ Error fetching posted invoices from Firestore: {e}. Proceeding without skipping based on FBR Invoice No.")
-            print(f"DEBUG: Error fetching posted invoices from Firestore: {e}")
-            already_posted_sinvs = set()
-
-
-        for sinv, group in invoices_grouped:
-            sinv_str = str(sinv) # Ensure SINV is a string for consistent keys/IDs
-            
-            # Check if this invoice was already posted AND has a valid FBR Invoice Number
-            if sinv_str in already_posted_sinvs:
-                messages.append(f"SINV {sinv_str}: ℹ️ Skipped (Already Posted).")
-                processed_invoices_data.append({
-                    "sinv": sinv_str,
-                    "invoice_json": {}, # Empty JSON as we're skipping processing
-                    "status": "Skipped (Already Posted)",
-                    "fbr_invoice_number": "N/A", # This will be overwritten if fetched from DB later
-                    "qr_code_url": "",
-                    "validation_response_text": "Invoice previously posted.",
-                    "post_response_text": "Invoice previously posted.",
-                    "validation_response_file_url": ""
-                })
-                continue # Skip to next invoice in Excel
+        for sinv_raw, group in df.groupby("SINV"):
+            sinv_display = s(sinv_raw)
+            sinv_key     = f"{sinv_display}_{inv_year}"
+            header       = group.iloc[0].to_dict()
 
             try:
-                invoice_header = group.iloc[0].to_dict()
-                
-                invoice_date_raw = invoice_header.get("invoiceDate")
-                if pd.isna(invoice_date_raw):
-                    messages.append(f"SINV {sinv_str}: ❌ Error: 'invoiceDate' is missing or invalid. Skipping.")
-                    continue
-                
+                inv_date = pd.to_datetime(header.get("invoiceDate")).strftime("%Y-%m-%d")
+            except Exception:
+                inv_date = _utcnow().strftime("%Y-%m-%d")
+
+            payload = {
+                "_sinv_display":      sinv_display,
+                "invoiceType":        s(header.get("invoiceType", "Sale Invoice")),
+                "invoiceDate":        inv_date,
+                "sellerNTNCNIC":      s(user.get("seller_ntn", "")),
+                "sellerBusinessName": s(user.get("seller_name", "")),
+                "sellerProvince":     s(user.get("seller_province", "")),
+                "sellerAddress":      s(user.get("seller_address", "")),
+                "buyerNTNCNIC":       s(header.get("buyerNTNCNIC", "")),
+                "buyerBusinessName":  s(header.get("buyerBusinessName", "")),
+                "buyerProvince":      s(header.get("buyerProvince", "")),
+                "buyerAddress":       s(header.get("buyerAddress", "")),
+                "buyerRegistrationType": s(header.get("buyerRegistrationType","Registered")),
+                "scenarioId":         s(header.get("scenarioId", "SN001")),
+                "items": [],
+            }
+
+            for item_row in group.to_dict("records"):
+                rate_raw = s(str(item_row.get("rate", "0")))
                 try:
-                    invoice_date = pd.to_datetime(invoice_date_raw).strftime('%Y-%m-%d')
-                except Exception as date_e:
-                    messages.append(f"SINV {sinv_str}: ❌ Error parsing 'invoiceDate': {date_e}. Raw value: {invoice_date_raw}. Skipping.")
-                    continue
-
-                invoice_json = {
-                    "invoiceType": safe_str_strip(invoice_header.get("invoiceType", "Sale Invoice")),
-                    "invoiceDate": invoice_date,
-                    "sellerNTNCNIC": safe_str_strip(invoice_header.get("sellerNTNCNIC", "")), 
-                    "sellerBusinessName": safe_str_strip(invoice_header.get("sellerBusinessName", "")),
-                    "sellerProvince": safe_str_strip(invoice_header.get("sellerProvince", "")),
-                    "sellerAddress": safe_str_strip(invoice_header.get("sellerAddress", "")),
-                    "buyerNTNCNIC": safe_str_strip(invoice_header.get("buyerNTNCNIC", "")),
-                    "buyerBusinessName": safe_str_strip(invoice_header.get("buyerBusinessName", "")),
-                    "buyerProvince": safe_str_strip(invoice_header.get("buyerProvince", "")),
-                    "buyerAddress": safe_str_strip(invoice_header.get("buyerAddress", "")),
-                    "buyerRegistrationType": safe_str_strip(invoice_header.get("buyerRegistrationType", "Registered")),
-                    "invoiceRefNo": safe_str_strip(invoice_header.get("invoiceRefNo", "")),
-                    "scenarioId": safe_str_strip(invoice_header.get("scenarioId", "SN001")),
-                    "items": []
-                }
-
-                for item_row in group.to_dict('records'):
-                    rate_val = item_row.get("rate")
-                    if isinstance(rate_val, str) and rate_val.endswith('%'):
-                        try:
-                            rate = f"{int(rate_val.replace('%', ''))}%"
-                        except ValueError:
-                            messages.append(f"SINV {sinv_str}: ❌ Error: Invalid 'rate' format for item. Found: {rate_val}. Skipping item.")
-                            continue
-                    else:
-                        try:
-                            rate = f"{int(rate_val)}%" if pd.notna(rate_val) else "0%"
-                        except (ValueError, TypeError):
-                            messages.append(f"SINV {sinv_str}: ❌ Error: Invalid 'rate' format for item. Found: {rate_val}. Skipping item.")
-                            continue
-
-                    item_obj = {
-                        "hsCode": format_hs_code_for_fbr(item_row.get("hsCode", "")),
-                        "productDescription": safe_str_strip(item_row.get("productDescription", "")),
-                        "rate": rate,
-                        "uoM": safe_str_strip(item_row.get("uoM", "")),
-                        "quantity": to_float(item_row.get("quantity", 0)),
-                        "totalValues": to_float(item_row.get("totalValues", 0)),
-                        "valueSalesExcludingST": to_float(item_row.get("valueSalesExcludingST", 0)),
-                        "fixedNotifiedValueOrRetailPrice": to_float(item_row.get("fixedNotifiedValueOrRetailPrice", 0)),
-                        "salesTaxApplicable": to_float(item_row.get("salesTaxApplicable", 0)),
-                        "salesTaxWithheldAtSource": to_float(item_row.get("salesTaxWithheldAtSource", 0)),
-                        "extraTax": safe_str_strip(item_row.get("extraTax", "")),
-                        "furtherTax": to_float(item_row.get("furtherTax", 0)),
-                        "sroScheduleNo": safe_str_strip(item_row.get("sroScheduleNo", "")),
-                        "fedPayable": to_float(item_row.get("fedPayable", 0)),
-                        "discount": to_float(item_row.get("discount", 0)),
-                        "saleType": safe_str_strip(item_row.get("saleType", "Goods at standard rate (default)")),
-                        "sroItemSerialNo": safe_str_strip(item_row.get("sroItemSerialNo", ""))
-                    }
-                    invoice_json["items"].append(item_obj)
-                
-                json_path = os.path.join(JSON_FOLDER, f"{sinv_str}.json")
-                with open(json_path, 'w') as f:
-                    json.dump(invoice_json, f, indent=2)
-                messages.append(f"SINV {sinv_str}: JSON payload prepared and saved to {json_path}")
-                print(f"DEBUG: Saved JSON payload to {json_path}")
-
-                processed_invoices_data.append({
-                    "sinv": sinv_str,
-                    "invoice_json": invoice_json,
-                    "status": "Pending",
-                    "fbr_invoice_number": "",
-                    "qr_code_url": "",
-                    "validation_response_text": "",
-                    "post_response_text": "",
-                    "validation_response_file_url": ""
+                    rate = f"{int(float(rate_raw.replace('%','')))}%"
+                except Exception:
+                    rate = "0%"
+                payload["items"].append({
+                    "hsCode":                          s(item_row.get("hsCode", "")),
+                    "productDescription":              s(item_row.get("productDescription", "")),
+                    "uoM":                             s(item_row.get("uoM", "")),
+                    "quantity":                        float(item_row.get("quantity", 0) or 0),
+                    "valueSalesExcludingST":            float(item_row.get("valueSalesExcludingST", 0) or 0),
+                    "rate":                            rate,
+                    "salesTaxApplicable":              float(item_row.get("salesTaxApplicable", 0) or 0),
+                    "discount":                        float(item_row.get("discount", 0) or 0),
+                    "furtherTax":                      float(item_row.get("furtherTax", 0) or 0),
+                    "fedPayable":                      float(item_row.get("fedPayable", 0) or 0),
+                    "salesTaxWithheldAtSource":        float(item_row.get("salesTaxWithheldAtSource", 0) or 0),
+                    "extraTax":                        s(item_row.get("extraTax", "")),
+                    "fixedNotifiedValueOrRetailPrice": float(item_row.get("fixedNotifiedValueOrRetailPrice", 0) or 0),
+                    "sroScheduleNo":                   s(item_row.get("sroScheduleNo", "")),
+                    "sroItemSerialNo":                 s(item_row.get("sroItemSerialNo", "")),
                 })
 
-            except Exception as e:
-                messages.append(f"SINV {sinv_str}: ❌ Error processing invoice data from Excel: {e}")
-                print(f"DEBUG: Error processing SINV {sinv_str} from Excel: {e}")
-
-
-        session['invoices_data'] = processed_invoices_data
-        session['initial_messages'] = messages
-
-        return redirect(url_for('display_invoices'))
-    
-    return render_template("index.html", messages=[])
-
-@app.route('/invoices')
-def display_invoices():
-    if 'invoices_data' not in session:
-        return redirect(url_for('upload_file'))
-
-    invoices = session.get('invoices_data', [])
-    initial_messages = session.pop('initial_messages', [])
-
-    return render_template("invoices.html", invoices=invoices, initial_messages=initial_messages)
-
-@app.route('/api/validate_invoice/<sinv>', methods=['POST'])
-async def api_validate_invoice(sinv): # Made async
-    token = session.get('fbr_token')
-    if not token:
-        return jsonify({"status": "error", "message": "Authorization token missing. Please re-upload Excel."}), 401
-
-    invoices_data = session.get('invoices_data', [])
-    invoice_found = None
-    for inv in invoices_data:
-        if inv['sinv'] == sinv:
-            invoice_found = inv
-            break
-    
-    if not invoice_found:
-        return jsonify({"status": "error", "message": f"Invoice {sinv} not found."}), 404
-
-    invoice_json = invoice_found['invoice_json']
-    
-    try:
-        request_headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
-        
-        print(f"\n--- SINV {sinv} Validation Request ---")
-        print(f"URL: {FBR_VALIDATE_URL}")
-        print(f"Headers: {json.dumps(request_headers, indent=2)}")
-        print(f"Request Body (JSON): {json.dumps(invoice_json, indent=2)}")
-        print(f"--- End SINV {sinv} Validation Request ---\n")
-
-        validate_response = requests.post(
-            FBR_VALIDATE_URL,
-            headers=request_headers,
-            json=invoice_json,
-            timeout=30
-        )
-        print(f"SINV {sinv}: Validation Response Status: {validate_response.status_code}")
-        print(f"SINV {sinv}: Validation Response Body: {validate_response.text}")
-
-        validation_response_filename = f"{sinv}_validated.json"
-        validation_response_path = os.path.join(RESPONSE_FOLDER, validation_response_filename)
-        try:
-            with open(validation_response_path, 'w') as f:
-                json.dump(validate_response.json(), f, indent=2)
-            print(f"SINV {sinv}: FBR validation response saved to {validation_response_path}")
-        except json.JSONDecodeError:
-            with open(validation_response_path, 'w') as f:
-                f.write(validate_response.text)
-            print(f"SINV {sinv}: FBR validation response saved as plain text to {validation_response_path} (not valid JSON)")
-        except Exception as save_e:
-            print(f"SINV {sinv}: Error saving validation response file: {save_e}")
-
-
-        is_valid = False
-        fbr_message = ""
-        try:
-            validate_res_json = validate_response.json()
-            validation_response_data = validate_res_json.get("validationResponse", {})
-            status_from_fbr_inner = validation_response_data.get("status", "").lower()
-
-            if status_from_fbr_inner == "valid":
-                is_valid = True
-                fbr_message = "Validation successful."
-            elif status_from_fbr_inner == "invalid":
-                fbr_message = validation_response_data.get("error", "Validation failed, no specific error provided.")
-            else:
-                fbr_message = f"Unexpected FBR status: '{status_from_fbr_inner}'. Full response: {validate_response.text}"
-
-        except json.JSONDecodeError:
-            fbr_message = f"FBR Validation Response is not valid JSON. Raw: {validate_response.text}"
-        except Exception as parse_e:
-            fbr_message = f"Error parsing FBR Validation Response: {parse_e}. Raw: {validate_response.text}"
-
-        for inv in invoices_data:
-            if inv['sinv'] == sinv:
-                inv['status'] = "Valid" if is_valid else "Validation Failed"
-                inv['validation_response_text'] = fbr_message
-                inv['validation_response_file_url'] = url_for('view_response_file', filename=validation_response_filename)
-                break
-        session['invoices_data'] = invoices_data
-
-        return jsonify({
-            "status": "success" if is_valid else "validation_failed",
-            "message": fbr_message,
-            "sinv": sinv,
-            "can_post": is_valid,
-            "validation_response_file_url": url_for('view_response_file', filename=validation_response_filename)
-        })
-
-    except requests.exceptions.RequestException as req_e:
-        return jsonify({"status": "error", "message": f"Network/API Request Error: {req_e}"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"An unexpected error occurred: {e}"}), 500
-
-@app.route('/api/post_invoice/<sinv>', methods=['POST'])
-async def api_post_invoice(sinv): # Made async
-    token = session.get('fbr_token')
-    if not token:
-        return jsonify({"status": "error", "message": "Authorization token missing. Please re-upload Excel."}), 401
-
-    invoices_data = session.get('invoices_data', [])
-    invoice_found = None
-    for inv in invoices_data:
-        if inv['sinv'] == sinv:
-            invoice_found = inv
-            break
-    
-    if not invoice_found:
-        return jsonify({"status": "error", "message": f"Invoice {sinv} not found."}), 404
-
-    if invoice_found['status'] != "Valid":
-        return jsonify({"status": "error", "message": f"Invoice {sinv} must be successfully validated before posting."}), 400
-
-    invoice_json = invoice_found['invoice_json']
-
-    try:
-        request_headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
-        }
-
-        print(f"\n--- SINV {sinv} Post Request ---")
-        print(f"URL: {FBR_POST_URL}")
-        print(f"Headers: {json.dumps(request_headers, indent=2)}")
-        print(f"Request Body (JSON): {json.dumps(invoice_json, indent=2)}")
-        print(f"--- End SINV {sinv} Post Request ---\n")
-
-        post_response = requests.post(
-            FBR_POST_URL,
-            headers=request_headers,
-            json=invoice_json,
-            timeout=30
-        )
-        print(f"SINV {sinv}: Post Response Status: {post_response.status_code}")
-        print(f"SINV {sinv}: Post Response Body: {post_response.text}")
-
-        fbr_invoice_number = "N/A"
-        qr_code_url = ""
-        pdf_url = ""
-        post_message = ""
-        
-        res_json = {}
-        try:
-            res_json = post_response.json()
-            fbr_invoice_number = res_json.get("invoiceNumber", "N/A")
-            post_message = "Invoice posted successfully."
-        except json.JSONDecodeError:
-            post_message = f"FBR Post Response is not valid JSON. Raw: {post_response.text}"
-        except Exception as parse_e:
-            post_message = f"Error parsing FBR Post Response: {parse_e}. Raw: {post_response.text}"
-
-        response_path = os.path.join(RESPONSE_FOLDER, f"{sinv}_posted.json")
-        with open(response_path, 'w') as f:
-            json.dump(res_json, f, indent=2)
-
-        if fbr_invoice_number != "N/A":
-            # --- Save to Firestore after successful FBR Post ---
             try:
-                user_id = await get_firestore_user_id()
-                invoice_doc_ref = db.collection('artifacts').document(app_id).collection('users').document(user_id).collection('posted_invoices').document(sinv)
-                invoice_doc_ref.set({
-                    'sinv': sinv,
-                    'fbr_invoice_number': fbr_invoice_number,
-                    'post_date': firestore.SERVER_TIMESTAMP,
-                    'status': 'posted'
-                })
-                print(f"DEBUG: SINV {sinv} marked as posted in Firestore.")
-                post_message += " (Status saved to Firestore)"
-            except Exception as firestore_e:
-                post_message += f" (WARNING: Failed to save status to Firestore: {firestore_e})"
-                print(f"ERROR: Failed to save SINV {sinv} to Firestore: {firestore_e}")
+                _db_upsert("invoices", {
+                    "id":           str(uuid.uuid4()),
+                    "user_email":   email,
+                    "sinv":         sinv_key,
+                    "invoice_date": inv_date,
+                    "invoice_type": payload["invoiceType"],
+                    "status":       "pending",
+                    "payload":      json.dumps(payload),
+                    "created_at":   _utcnow().isoformat(),
+                }, conflict_col="id")
+                processed += 1
+            except Exception as exc:
+                app.logger.warning("Import SINV %s failed: %s", sinv_display, exc)
+                skipped += 1
 
-            # Generate QR Code
-            qr_data = (
-                f"Invoice No: {fbr_invoice_number}\n"
-                f"Seller: {invoice_json['sellerBusinessName']}\n"
-                f"Buyer: {invoice_json['buyerBusinessName']}\n"
-                f"Date: {invoice_json['invoiceDate']}"
-            )
-            qr = qrcode.make(qr_data)
-            qr_filename = f"{sinv}_{fbr_invoice_number}.png"
-            qr_path = os.path.join(QR_FOLDER, qr_filename)
-            qr.save(qr_path)
-            qr_code_url = url_for('download_qr', filename=qr_filename)
+        flash(f"Imported {processed} invoice(s). {skipped} skipped.", "success")
+        return redirect(url_for("invoices_page"))
 
-            # Generate PDF (can be done on demand or here)
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt=f"Invoice No: {fbr_invoice_number}", ln=True)
-            pdf.cell(200, 10, txt=f"Seller: {invoice_json['sellerBusinessName']}", ln=True)
-            pdf.cell(200, 10, txt=f"Buyer: {invoice_json['buyerBusinessName']}", ln=True)
-            pdf.cell(200, 10, txt=f"Date: {invoice_json['invoiceDate']}", ln=True)
-            
-            pdf.ln(10)
-            pdf.set_font("Arial", 'B', size=10)
-            pdf.cell(50, 7, "Product", 1)
-            pdf.cell(30, 7, "Quantity", 1)
-            pdf.cell(30, 7, "Rate", 1)
-            pdf.cell(40, 7, "Sales Tax", 1)
-            pdf.cell(40, 7, "Total Value", 1, ln=True)
-            pdf.set_font("Arial", size=10)
-            for item in invoice_json["items"]:
-                pdf.cell(50, 7, item.get("productDescription", ""), 1)
-                pdf.cell(30, 7, str(item.get("quantity", "")), 1)
-                pdf.cell(30, 7, str(item.get("rate", "")), 1)
-                pdf.cell(40, 7, str(item.get("salesTaxApplicable", "")), 1)
-                pdf.cell(40, 7, str(item.get("totalValues", "")), 1, ln=True)
+    return render_template("upload.html", user=user)
 
-            pdf.ln(10)
-            if os.path.exists(qr_path):
-                pdf.image(qr_path, x=10, y=pdf.get_y(), w=40)
-                pdf.ln(45)
-            
-            pdf_filename = f"{sinv}_{fbr_invoice_number}.pdf"
-            pdf_path = os.path.join(PDF_FOLDER, pdf_filename)
-            pdf.output(pdf_path)
-            pdf_url = url_for('download_pdf', filename=pdf_filename)
-            post_message += f" PDF generated at {pdf_url}"
-        else:
-            post_message += " Invoice number missing or invalid from FBR response."
+# ─────────────────────────────────────────────────────────────────────────────
+#  Validate & Post (single invoice via AJAX)
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/api/invoice/validate/<sinv>", methods=["POST"])
+@login_required
+def api_validate_invoice(sinv):
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+    token = s(user.get("fbr_token", ""))
+    if not token:
+        return jsonify({"ok": False, "error": "No FBR token configured."}), 400
 
-        for inv in invoices_data:
-            if inv['sinv'] == sinv:
-                inv['status'] = "Posted" if fbr_invoice_number != "N/A" else "Post Failed"
-                inv['fbr_invoice_number'] = fbr_invoice_number
-                inv['qr_code_url'] = qr_code_url
-                inv['pdf_url'] = pdf_url
-                inv['post_response_text'] = post_message
+    row = _db_get("invoices", user_email=email, sinv=sinv)
+    if not row:
+        return jsonify({"ok": False, "error": "Invoice not found."}), 404
+
+    payload      = json.loads(row.get("payload") or "{}")
+    validate_url, _ = _fbr_urls(user.get("fbr_env", "sandbox"))
+    headers      = {"Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}"}
+    try:
+        vr = requests.post(validate_url, headers=headers, json=payload, timeout=30)
+        vj = vr.json()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    vdata    = vj.get("validationResponse", {})
+    is_valid = vdata.get("status", "").lower() == "valid"
+    status   = "valid" if is_valid else "validation_failed"
+    _update_invoice_status(email, sinv, status)
+    _save_response_dump("validate", sinv, vj)
+
+    return jsonify({
+        "ok":      is_valid,
+        "status":  status,
+        "message": "Valid" if is_valid else (
+            vdata.get("error") or vr.text),
+    })
+
+
+@app.route("/api/invoice/post/<sinv>", methods=["POST"])
+@login_required
+def api_post_invoice(sinv):
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+    token = s(user.get("fbr_token", ""))
+    if not token:
+        return jsonify({"ok": False, "error": "No FBR token configured."}), 400
+
+    row = _db_get("invoices", user_email=email, sinv=sinv)
+    if not row:
+        return jsonify({"ok": False, "error": "Invoice not found."}), 404
+    if row["status"] != "valid":
+        return jsonify({"ok": False, "error": "Invoice must be validated first."}), 400
+
+    payload = json.loads(row.get("payload") or "{}")
+    _, post_url = _fbr_urls(user.get("fbr_env", "sandbox"))
+    headers     = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {token}"}
+    try:
+        pr = requests.post(post_url, headers=headers, json=payload, timeout=30)
+        pj = pr.json()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+    fbr_inv_no = s(pj.get("invoiceNumber", ""))
+    _save_response_dump("post", sinv, pj)
+
+    if not fbr_inv_no:
+        _update_invoice_status(email, sinv, "post_failed")
+        return jsonify({"ok": False, "error": f"No invoice number returned: {pr.text}"}), 500
+
+    # Generate PDF
+    pdf_file = _generate_pdf(sinv, fbr_inv_no, payload)
+    _update_invoice_status(email, sinv, "posted", fbr_inv_no, pdf_file)
+
+    pdf_url = url_for("download_invoice_pdf", filename=pdf_file) if pdf_file else ""
+    return jsonify({"ok": True, "fbr_invoice_no": fbr_inv_no, "pdf_url": pdf_url})
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Streaming bulk validate-and-post  (Bug-fix #13: proper queue import)
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/api/stream/validate-post", methods=["POST"])
+@login_required
+def stream_validate_and_post():
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+    token = s(user.get("fbr_token", ""))
+    if not token:
+        return jsonify({"error": "No FBR token"}), 400
+
+    env          = user.get("fbr_env", "sandbox")
+    validate_url, post_url = _fbr_urls(env)
+    data_payload = request.get_json(silent=True) or {}
+    sinvs        = data_payload.get("sinvs", [])
+
+    # Bug-fix #13: use queue.Queue() (was __import__("queue").Queue())
+    q = queue.Queue()
+
+    def worker():
+        for sinv_key in sinvs:
+            row = _db_get("invoices", user_email=email, sinv=sinv_key)
+            if not row:
+                q.put({"sinv": sinv_key, "status": "error", "message": "Not found"})
+                continue
+            try:
+                pl      = json.loads(row.get("payload") or "{}")
+                hdrs    = {"Content-Type": "application/json",
+                           "Authorization": f"Bearer {token}"}
+                vr      = requests.post(validate_url, headers=hdrs, json=pl, timeout=30)
+                vj      = vr.json()
+                if vj.get("validationResponse", {}).get("status","").lower() != "valid":
+                    _update_invoice_status(email, sinv_key, "validation_failed")
+                    q.put({"sinv": sinv_key, "status": "validation_failed"})
+                    continue
+                pr      = requests.post(post_url, headers=hdrs, json=pl, timeout=30)
+                pj      = pr.json()
+                fbr_no  = s(pj.get("invoiceNumber",""))
+                if fbr_no:
+                    pdf_f = _generate_pdf(sinv_key, fbr_no, pl)
+                    _update_invoice_status(email, sinv_key, "posted", fbr_no, pdf_f)
+                    q.put({"sinv": sinv_key, "status": "posted", "fbr_no": fbr_no})
+                else:
+                    _update_invoice_status(email, sinv_key, "post_failed")
+                    q.put({"sinv": sinv_key, "status": "post_failed"})
+            except Exception as exc:
+                q.put({"sinv": sinv_key, "status": "error", "message": str(exc)})
+        q.put(None)  # sentinel
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        while True:
+            item = q.get()
+            if item is None:
+                yield f"data: {json.dumps({'done': True})}\n\n"
                 break
-        session['invoices_data'] = invoices_data
+            yield f"data: {json.dumps(item)}\n\n"
 
-        return jsonify({
-            "status": "success" if fbr_invoice_number != "N/A" else "post_failed",
-            "message": post_message,
-            "sinv": sinv,
-            "fbr_invoice_number": fbr_invoice_number,
-            "qr_code_url": qr_code_url,
-            "pdf_url": pdf_url
+    return Response(stream_with_context(generate()), content_type="text/event-stream")
+
+
+@app.route("/api/stream/validate-only", methods=["POST"])
+@login_required
+def stream_validate():
+    """Streaming validate-only for bulk operations."""
+    email = session["email"]
+    user  = _db_get("users", email=email) or {}
+    token = s(user.get("fbr_token", ""))
+    if not token:
+        return jsonify({"error": "No FBR token"}), 400
+
+    env          = user.get("fbr_env", "sandbox")
+    validate_url, _ = _fbr_urls(env)
+    data_payload = request.get_json(silent=True) or {}
+    sinvs        = data_payload.get("sinvs", [])
+    q            = queue.Queue()   # Bug-fix #13: proper import
+
+    def worker():
+        for sinv_key in sinvs:
+            row = _db_get("invoices", user_email=email, sinv=sinv_key)
+            if not row:
+                q.put({"sinv": sinv_key, "status": "error", "message": "Not found"})
+                continue
+            try:
+                pl   = json.loads(row.get("payload") or "{}")
+                hdrs = {"Content-Type": "application/json",
+                        "Authorization": f"Bearer {token}"}
+                vr   = requests.post(validate_url, headers=hdrs, json=pl, timeout=30)
+                vj   = vr.json()
+                ok   = vj.get("validationResponse",{}).get("status","").lower() == "valid"
+                st   = "valid" if ok else "validation_failed"
+                _update_invoice_status(email, sinv_key, st)
+                q.put({"sinv": sinv_key, "status": st})
+            except Exception as exc:
+                q.put({"sinv": sinv_key, "status": "error", "message": str(exc)})
+        q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        while True:
+            item = q.get()
+            if item is None:
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return Response(stream_with_context(generate()), content_type="text/event-stream")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Buyers
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/buyers")
+@login_required
+def buyers_page():
+    email  = session["email"]
+    buyers = _db_get_all("buyers", order_by="business_name ASC", user_email=email)
+    return render_template("buyers.html", buyers=buyers)
+
+
+@app.route("/api/buyers", methods=["GET"])
+@login_required
+def api_buyers_list():
+    email = session["email"]
+    q_str = s(request.args.get("q", ""))
+    with _db() as conn:
+        if q_str:
+            rows = conn.execute(
+                """SELECT * FROM buyers WHERE user_email=?
+                   AND (ntn_cnic LIKE ? OR business_name LIKE ?)
+                   ORDER BY business_name""",
+                [email, f"%{q_str}%", f"%{q_str}%"]
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM buyers WHERE user_email=? ORDER BY business_name",
+                [email]
+            ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/buyers/save", methods=["POST"])
+@login_required
+def api_buyers_save():
+    email = session["email"]
+    d     = request.get_json(silent=True) or {}
+    ntn   = s(d.get("ntn_cnic", ""))
+    if not ntn:
+        return jsonify({"ok": False, "error": "NTN/CNIC is required."}), 400
+
+    _db_upsert("buyers", {
+        "id":            str(uuid.uuid4()),
+        "user_email":    email,
+        "ntn_cnic":      ntn,
+        "business_name": s(d.get("business_name", "")),
+        "province":      s(d.get("province", "")),
+        "address":       s(d.get("address", "")),
+        "reg_type":      s(d.get("reg_type", "Registered")),
+        "strn":          s(d.get("strn", "")),
+        "created_at":    _utcnow().isoformat(),
+    }, conflict_col="id")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/buyers/delete/<ntn>", methods=["POST"])
+@login_required
+def api_buyers_delete(ntn):
+    email    = session["email"]
+    safe_ntn = s(ntn)
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM buyers WHERE user_email=? AND ntn_cnic=?",
+            [email, safe_ntn]
+        )
+    return jsonify({"ok": True})
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Export & Reports
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/export/excel")
+@login_required
+def export_invoices_excel():
+    email   = session["email"]
+    rows    = _db_get_all("invoices", user_email=email)
+    records = []
+    for r in rows:
+        raw = {}
+        try:
+            raw = json.loads(r.get("payload") or "{}")
+        except Exception:
+            pass
+        records.append({
+            "SINV":            _sinv_display_key(r["sinv"]),
+            "Invoice Date":    r.get("invoice_date", ""),
+            "Invoice Type":    r.get("invoice_type", ""),
+            "Status":          r.get("status", ""),
+            "FBR Invoice No":  r.get("fbr_invoice_no", ""),
+            "Buyer":           raw.get("buyerBusinessName", ""),
+            "Buyer NTN":       raw.get("buyerNTNCNIC", ""),
+            "Items Count":     len(raw.get("items", [])),
         })
 
-    except requests.exceptions.RequestException as req_e:
-        return jsonify({"status": "error", "message": f"Network/API Request Error: {req_e}"}), 500
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"An unexpected error occurred: {e}"}), 500
+    df       = pd.DataFrame(records)
+    tmp_path = os.path.join(
+        BACKUP_DIR,
+        f"invoices_export_{_utcnow().strftime('%Y%m%d%H%M%S')}.xlsx"
+    )
 
-@app.route('/downloads/qr/<filename>')
-def download_qr(filename):
-    return send_from_directory(QR_FOLDER, filename, as_attachment=True)
+    with pd.ExcelWriter(tmp_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Invoices")
+        ws = writer.sheets["Invoices"]
+        # Bug-fix #11: renamed loop variable ws_col (was col, shadowing outer var)
+        for ws_col in ws.columns:
+            max_len = max((len(str(cell.value or "")) for cell in ws_col), default=10)
+            ws.column_dimensions[ws_col[0].column_letter].width = min(max_len + 4, 60)
 
-@app.route('/downloads/pdf/<filename>')
-def download_pdf(filename):
-    return send_from_directory(PDF_FOLDER, filename, as_attachment=True)
-
-@app.route('/view/response_file/<filename>')
-def view_response_file(filename):
-    file_path = safe_join(app.root_path, RESPONSE_FOLDER, filename)
-    
-    if filename.endswith('.json'):
-        mimetype = 'application/json'
-    else:
-        mimetype = 'text/plain'
-
-    return send_file(file_path, mimetype=mimetype)
+    return send_file(
+        tmp_path, as_attachment=True,
+        download_name=f"invoices_{_utcnow().strftime('%Y%m%d')}.xlsx"
+    )
 
 
-# --- Main Application Entry Point for Web Hosting ---
-if __name__ == '__main__':
-    # This block is for local development only.
-    # When deployed with Gunicorn/Nginx, they will run `app` directly.
-    print("Running Flask app in local development mode.")
-    app.run(debug=True, port=5000) # Use a standard port for local testing
+@app.route("/report/monthly/<int:year>/<int:month>")
+@login_required
+def report_monthly_pdf(year, month):
+    email = session["email"]
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT * FROM invoices
+               WHERE user_email=? AND invoice_date LIKE ?
+               ORDER BY invoice_date""",
+            [email, f"{year}-{month:02d}-%"]
+        ).fetchall()
+    rows = [dict(r) for r in rows]
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 12, f"Monthly Report — {year}/{month:02d}", 0, 1, "C")
+    pdf.ln(2)
+    pdf.set_font("Arial", "B", 9)
+    pdf.set_fill_color(220, 220, 220)
+    col_w = [40, 25, 30, 50, 45]
+    hdrs  = ["SINV", "Date", "Status", "Buyer", "FBR Invoice No"]
+    for i, h in enumerate(hdrs):
+        pdf.cell(col_w[i], 8, h, 1, 0, "C", True)
+    pdf.ln()
+    pdf.set_font("Arial", "", 8)
+    for r in rows:
+        raw = {}
+        try:
+            raw = json.loads(r.get("payload") or "{}")
+        except Exception:
+            pass
+        buyer = s(raw.get("buyerBusinessName", "")) or "(unregistered)"
+        # Bug-fix #12: no longer skips invoices with empty buyer name
+        # Bug-fix #12: renamed inner loop var (no shadowing issue in PDF cols)
+        pdf.cell(40, 7, _sinv_display_key(r["sinv"])[:18], 1)
+        pdf.cell(25, 7, r.get("invoice_date","")[:10], 1)
+        pdf.cell(30, 7, r.get("status","")[:14], 1)
+        pdf.cell(50, 7, buyer[:22], 1)
+        pdf.cell(45, 7, r.get("fbr_invoice_no","")[:20], 1)
+        pdf.ln()
+
+    tmp = os.path.join(
+        BACKUP_DIR,
+        f"report_{year}_{month:02d}_{_utcnow().strftime('%Y%m%d%H%M%S')}.pdf"
+    )
+    pdf.output(tmp)
+    return send_file(
+        tmp, as_attachment=True,
+        download_name=f"report_{year}_{month:02d}.pdf"
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Downloads
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/pdf/<filename>")
+@login_required
+def download_invoice_pdf(filename):
+    # Bug-fix #15: sanitize filename; use safe in DB ownership check too
+    safe  = secure_filename(filename)
+    email = session["email"]
+    with _db() as conn:
+        row = conn.execute(
+            # Bug-fix #15: query uses safe (sanitized) not raw filename
+            "SELECT id FROM invoices WHERE user_email=? AND pdf_path=?",
+            [email, safe]
+        ).fetchone()
+    if not row and not session.get("is_super_admin"):
+        return "Not found or access denied.", 404
+    path = os.path.join(PDF_DIR, safe)
+    if not os.path.exists(path):
+        return "PDF file not found on disk.", 404
+    return send_file(path, as_attachment=True, download_name=safe)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Admin panel
+# ─────────────────────────────────────────────────────────────────────────────
+@app.route("/admin")
+@admin_required
+def admin_panel():
+    with _db() as conn:
+        users  = [dict(u) for u in conn.execute(
+            "SELECT * FROM users ORDER BY email").fetchall()]
+        total  = conn.execute("SELECT COUNT(*) FROM invoices").fetchone()[0]
+        posted = conn.execute(
+            "SELECT COUNT(*) FROM invoices WHERE status='posted'").fetchone()[0]
+    return render_template("admin.html", users=users,
+                           total_invoices=total, posted_invoices=posted)
+
+
+@app.route("/admin/scheduler-status")
+@admin_required
+def admin_scheduler_status():
+    # Bug-fix #4: BACKUP_DIR defined at top of file — no NameError
+    try:
+        backups = sorted(os.listdir(BACKUP_DIR))
+    except Exception:
+        backups = []
+    return jsonify({
+        "backup_dir":     BACKUP_DIR,
+        "backup_count":   len(backups),
+        "latest_backup":  backups[-1] if backups else None,
+        "worker_alive":   _bg_thread.is_alive() if _bg_thread else False,
+    })
+
+
+@app.route("/admin/delete-user/<path:target_email>", methods=["POST"])
+@admin_required
+def admin_delete_user(target_email):
+    safe_email = s(target_email).lower()
+    if safe_email == SUPER_ADMIN_EMAIL.lower():
+        flash("Cannot delete super admin.", "error")
+        return redirect(url_for("admin_panel"))
+    with _db() as conn:
+        conn.execute("DELETE FROM users    WHERE email=?",      [safe_email])
+        conn.execute("DELETE FROM invoices WHERE user_email=?", [safe_email])
+        conn.execute("DELETE FROM buyers   WHERE user_email=?", [safe_email])
+    flash(f"User {safe_email} and all their data have been deleted.", "success")
+    return redirect(url_for("admin_panel"))
+
+
+@app.route("/admin/view-as/<path:target_email>")
+@admin_required
+def admin_view_as(target_email):
+    safe_email = s(target_email).lower()
+    user = _db_get("users", email=safe_email)
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("admin_panel"))
+    # Bug-fix (admin_view_as): preserve is_super_admin and admin email
+    session["admin_email"]    = session["email"]
+    session["email"]          = safe_email
+    session["seller_name"]    = user.get("seller_name", "")
+    session["is_super_admin"] = True   # keep admin powers while viewing
+    flash(f"Viewing as {safe_email}. Click 'Back to Admin' to return.", "info")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/admin/back")
+def admin_back():
+    admin_email = session.pop("admin_email", None)
+    if not admin_email or not session.get("is_super_admin"):
+        return redirect(url_for("dashboard"))
+    session["email"]       = admin_email
+    session["seller_name"] = "Super Admin"
+    flash("Returned to admin view.", "info")
+    return redirect(url_for("admin_panel"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Shared helpers (used by multiple routes)
+# ─────────────────────────────────────────────────────────────────────────────
+def _update_invoice_status(email, sinv_key, status, fbr_no="", pdf_file=""):
+    with _db() as conn:
+        conn.execute(
+            """UPDATE invoices
+               SET status=?, fbr_invoice_no=?, pdf_path=?, updated_at=?
+               WHERE user_email=? AND sinv=?""",
+            [status, fbr_no, pdf_file, _utcnow().isoformat(), email, sinv_key]
+        )
+
+
+def _generate_pdf(sinv_key: str, fbr_inv_no: str, payload: dict) -> str:
+    """Generate a PDF invoice and return the filename (empty on failure)."""
+    sinv_display = payload.get("_sinv_display") or _sinv_display_key(sinv_key)
+    try:
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", "B", 16)
+        pdf.cell(0, 12, "FBR Digital Invoice", 0, 1, "C")
+        pdf.set_font("Arial", "", 10)
+        pdf.ln(2)
+        for label, value in [
+            ("FBR Invoice No:", fbr_inv_no),
+            ("SINV:",           sinv_display),
+            ("Invoice Date:",   payload.get("invoiceDate", "")),
+            ("Invoice Type:",   payload.get("invoiceType", "")),
+            ("Seller:",         payload.get("sellerBusinessName", "")),
+            ("Seller NTN:",     payload.get("sellerNTNCNIC", "")),
+            ("Buyer:",          payload.get("buyerBusinessName", "")),
+            ("Buyer NTN:",      payload.get("buyerNTNCNIC", "")),
+        ]:
+            pdf.cell(50, 7, label, 0)
+            pdf.cell(0, 7, str(value), 0, 1)
+        pdf.ln(3)
+        pdf.set_font("Arial", "B", 9)
+        pdf.set_fill_color(230, 230, 230)
+        col_w = [55, 12, 18, 30, 30, 30]
+        for cw, ch in zip(col_w, ["Description","UoM","Qty","Value Excl ST","Sales Tax","Rate"]):
+            pdf.cell(cw, 7, ch, 1, 0, "C", True)
+        pdf.ln()
+        pdf.set_font("Arial", "", 8)
+        for item in payload.get("items", []):
+            pdf.cell(55, 6, str(item.get("productDescription",""))[:30], 1)
+            pdf.cell(12, 6, str(item.get("uoM","")), 1, 0, "C")
+            pdf.cell(18, 6, str(item.get("quantity","")), 1, 0, "R")
+            pdf.cell(30, 6, str(item.get("valueSalesExcludingST","")), 1, 0, "R")
+            pdf.cell(30, 6, str(item.get("salesTaxApplicable","")), 1, 0, "R")
+            pdf.cell(30, 6, str(item.get("rate","")), 1, 0, "C")
+            pdf.ln()
+        pdf_file = f"{sinv_display}_{fbr_inv_no}.pdf"
+        pdf.output(os.path.join(PDF_DIR, pdf_file))
+        return pdf_file
+    except Exception as exc:
+        app.logger.warning("_generate_pdf failed: %s", exc)
+        return ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Background worker  (Bug-fix #14: last_cleanup_day initialised before loop)
+# ─────────────────────────────────────────────────────────────────────────────
+def _background_worker():
+    last_cleanup_day = None   # Bug-fix #14: explicit None before while loop
+    while True:
+        try:
+            today = _utcnow().date()
+            if last_cleanup_day != today:
+                last_cleanup_day = today
+                # Daily DB backup
+                try:
+                    bk_name = f"invoices_backup_{today.strftime('%Y%m%d')}.db"
+                    shutil.copy2(DB_PATH, os.path.join(BACKUP_DIR, bk_name))
+                    # Keep only last 30 backups
+                    all_bk = sorted(
+                        [f for f in os.listdir(BACKUP_DIR) if f.endswith(".db")],
+                        reverse=True
+                    )
+                    for old in all_bk[30:]:
+                        try:
+                            os.remove(os.path.join(BACKUP_DIR, old))
+                        except Exception:
+                            pass
+                except Exception as bk_err:
+                    app.logger.warning("Daily backup failed: %s", bk_err)
+                # Prune old response dumps (keep 7 days)
+                try:
+                    cutoff = _utcnow().timestamp() - 7 * 86400
+                    for fn in os.listdir(RESP_DIR):
+                        fp = os.path.join(RESP_DIR, fn)
+                        if os.path.isfile(fp) and os.path.getmtime(fp) < cutoff:
+                            os.remove(fp)
+                except Exception:
+                    pass
+        except Exception as exc:
+            app.logger.error("Background worker error: %s", exc)
+
+        threading.Event().wait(3600)   # sleep 1 hour
+
+
+_bg_thread = threading.Thread(target=_background_worker, daemon=True)
+_bg_thread.start()
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("Starting FBR Invoice App …")
+    print(f"  DB:         {DB_PATH}")
+    print(f"  PDF dir:    {PDF_DIR}")
+    print(f"  Backup dir: {BACKUP_DIR}")
+    print(f"  Admin:      {SUPER_ADMIN_EMAIL}")
+    # debug mode only when FLASK_DEBUG env var is explicitly set
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(debug=debug_mode, host="0.0.0.0", port=5000)

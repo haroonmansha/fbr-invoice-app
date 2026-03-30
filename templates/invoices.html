@@ -1,445 +1,218 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FBR Invoices - Process</title>
-    <!-- Tailwind CSS CDN -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #f0f2f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 40px auto;
-            padding: 20px;
-            background-color: #ffffff;
-            border-radius: 12px;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
-        }
-        .table-container {
-            overflow-x: auto; /* Enable horizontal scrolling on small screens */
-            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
-        }
-        table {
-            min-width: 800px; /* Ensure table doesn't get too narrow */
-        }
-        th, td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #e2e8f0;
-        }
-        th {
-            background-color: #f8f9fa;
-            font-weight: 600;
-            color: #4a5568;
-        }
-        tr:hover {
-            background-color: #f5f7fa;
-        }
-        .btn {
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease-in-out;
-            white-space: nowrap; /* Prevent button text from wrapping */
-        }
-        .btn-validate {
-            background-color: #3b82f6; /* Blue */
-            color: white;
-        }
-        .btn-validate:hover {
-            background-color: #2563eb;
-            transform: translateY(-1px);
-        }
-        .btn-post {
-            background-color: #22c55e; /* Green */
-            color: white;
-        }
-        .btn-post:hover {
-            background-color: #16a34a;
-            transform: translateY(-1px);
-        }
-        .btn-view { /* New style for view button */
-            background-color: #60a5fa; /* Lighter blue */
-            color: white;
-        }
-        .btn-view:hover {
-            background-color: #3b82f6;
-            transform: translateY(-1px);
-        }
-        .btn-download {
-            background-color: #6b7280; /* Gray */
-            color: white;
-        }
-        .btn-download:hover {
-            background-color: #4b5563;
-            transform: translateY(-1px);
-        }
-        .btn:disabled {
-            background-color: #cbd5e1;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        .status-pending { color: #f59e0b; font-weight: 500; } /* Amber */
-        .status-valid { color: #10b981; font-weight: 500; } /* Emerald */
-        .status-validation-failed { color: #ef4444; font-weight: 500; } /* Red */
-        .status-posted { color: #0ea5e9; font-weight: 500; } /* Sky Blue */
-        .status-post-failed { color: #dc2626; font-weight: 500; } /* Darker Red */
-        .status-skipped-already-posted { color: #6b7280; font-weight: 500; } /* Gray for skipped */
-        .message-box {
-            margin-bottom: 20px;
-            padding: 15px;
-            border-radius: 8px;
-            font-size: 0.95em;
-            line-height: 1.5;
-            word-wrap: break-word; /* Ensure long messages wrap */
-        }
-        .message-box p {
-            margin: 5px 0; /* Space between message paragraphs */
-        }
-        .message-box.success {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-        .message-box.error {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-        .spinner {
-            border: 3px solid rgba(255, 255, 255, 0.3);
-            border-top: 3px solid #fff;
-            border-radius: 50%;
-            width: 16px;
-            height: 16px;
-            animation: spin 1s linear infinite;
-            display: inline-block;
-            vertical-align: middle;
-            margin-right: 8px;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
-</head>
-<body class="bg-gray-100 p-4 sm:p-6">
-    <div class="container">
-        <h1 class="text-3xl font-bold text-center text-gray-800 mb-8">FBR Invoice Processing</h1>
+{% extends "base.html" %}
+{% block title %}Invoices — FBR Invoice{% endblock %}
+{% block breadcrumb %}Invoices{% endblock %}
 
-        <!-- Initial messages from Excel processing -->
-        {% if initial_messages %}
-            <div class="message-box error">
-                <h2 class="font-semibold text-lg mb-2">Initial Processing Messages:</h2>
-                {% for message in initial_messages %}
-                    <p>{{ message | safe }}</p>
-                {% endfor %}
+{% block extra_head %}
+<style>.action-btn{font-size:.78rem;padding:.28rem .6rem;}</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="fw-bold mb-0"><i class="bi bi-file-earmark-text me-2"></i>Invoices</h4>
+  <div class="d-flex gap-2">
+    <a href="{{ url_for('realtime_entry') }}" class="btn btn-primary btn-sm">
+      <i class="bi bi-plus-lg me-1"></i>New
+    </a>
+    <button class="btn btn-outline-success btn-sm" id="btnBulkValidate">
+      <i class="bi bi-shield-check me-1"></i>Validate Selected
+    </button>
+    <button class="btn btn-success btn-sm" id="btnBulkPost">
+      <i class="bi bi-send me-1"></i>Post Selected
+    </button>
+    <a href="{{ url_for('export_invoices_excel') }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-download me-1"></i>Export
+    </a>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body py-2 px-3 d-flex gap-3 align-items-center flex-wrap">
+    <input type="search" class="form-control form-control-sm" style="max-width:200px;"
+           id="filterSearch" placeholder="Search SINV or buyer…">
+    <select class="form-select form-select-sm" style="max-width:160px;" id="filterStatus">
+      <option value="">All Statuses</option>
+      <option value="pending">Pending</option>
+      <option value="valid">Valid</option>
+      <option value="posted">Posted</option>
+      <option value="validation_failed">Validation Failed</option>
+      <option value="post_failed">Post Failed</option>
+    </select>
+    <small class="text-muted ms-auto" id="rowCount"></small>
+  </div>
+</div>
+
+<div id="bulkProgress" class="alert alert-info d-none py-2 px-3 small">
+  <span class="spin me-1">↻</span><span id="bulkMsg">Processing…</span>
+</div>
+
+<div class="card">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table mb-0" id="invoiceTable">
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="selectAll" class="form-check-input"></th>
+            <th>SINV</th><th>Date</th><th>Type</th><th>Buyer</th>
+            <th>Items</th><th>Status</th><th>FBR Invoice No</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="invoiceBody">
+        {% for inv in invoices %}
+        <tr data-sinv="{{ inv.sinv }}" data-status="{{ inv.status }}"
+            data-search="{{ (inv.display_sinv ~ ' ' ~ inv.buyer_name)|lower }}">
+          <td><input type="checkbox" class="form-check-input row-check" value="{{ inv.sinv }}"></td>
+          <td class="fw-semibold">
+            <a href="{{ url_for('realtime_entry') }}?edit={{ inv.display_sinv }}"
+               class="text-decoration-none">{{ inv.display_sinv }}</a>
+          </td>
+          <td>{{ inv.invoice_date }}</td>
+          <td><small>{{ inv.invoice_type }}</small></td>
+          <td>
+            {{ inv.buyer_name or '—' }}
+            {% if inv.buyer_ntn %}<br><small class="text-muted">{{ inv.buyer_ntn }}</small>{% endif %}
+          </td>
+          <td class="text-center">{{ inv.item_count }}</td>
+          <td>
+            <span class="badge rounded-pill
+              {% if inv.status=='posted' %}badge-posted
+              {% elif inv.status=='valid' %}badge-valid
+              {% elif inv.status=='pending' %}badge-pending
+              {% elif 'failed' in inv.status %}badge-vfailed
+              {% else %}bg-secondary{% endif %}"
+              id="status-{{ inv.sinv }}">
+              {{ inv.status|replace('_',' ')|title }}
+            </span>
+          </td>
+          <td id="fbr-{{ inv.sinv }}">{{ inv.fbr_invoice_no or '—' }}</td>
+          <td>
+            <div class="d-flex gap-1 flex-wrap">
+              {% if inv.status in ('pending','validation_failed') %}
+              <button class="btn btn-outline-primary action-btn btn-validate" data-sinv="{{ inv.sinv }}"
+                      title="Validate"><i class="bi bi-shield-check"></i></button>
+              {% endif %}
+              {% if inv.status == 'valid' %}
+              <button class="btn btn-success action-btn btn-post" data-sinv="{{ inv.sinv }}"
+                      title="Post to FBR"><i class="bi bi-send"></i></button>
+              {% endif %}
+              {% if inv.pdf_path %}
+              <a href="{{ url_for('download_invoice_pdf', filename=inv.pdf_path) }}"
+                 class="btn btn-outline-secondary action-btn" title="Download PDF">
+                <i class="bi bi-file-pdf"></i></a>
+              {% endif %}
+              <button class="btn btn-outline-danger action-btn btn-delete"
+                      data-sinv="{{ inv.sinv }}" title="Delete"><i class="bi bi-trash"></i></button>
             </div>
-        {% endif %}
-
-        <div class="table-container">
-            <table class="w-full border-collapse">
-                <thead>
-                    <tr>
-                        <th>SINV</th>
-                        <th>Invoice Date</th>
-                        <th>Buyer Name</th>
-                        <th>Status</th>
-                        <th>FBR Invoice No.</th>
-                        <th>Actions</th>
-                        <th>Details & Downloads</th>
-                    </tr>
-                </thead>
-                <tbody id="invoice-table-body">
-                    {% for invoice in invoices %}
-                    <tr id="invoice-row-{{ invoice.sinv }}">
-                        <td>{{ invoice.sinv }}</td>
-                        <td>{{ invoice.invoice_json.invoiceDate if invoice.invoice_json else 'N/A' }}</td>
-                        <td>{{ invoice.invoice_json.buyerBusinessName if invoice.invoice_json else 'N/A' }}</td>
-                        <td id="status-{{ invoice.sinv }}" class="status-{{ invoice.status | lower | replace(' ', '-') | replace('(', '') | replace(')', '') }}">
-                            {{ invoice.status }}
-                        </td>
-                        <td id="fbr-invoice-no-{{ invoice.sinv }}">
-                            {{ invoice.fbr_invoice_number if invoice.fbr_invoice_number != 'N/A' else '' }}
-                        </td>
-                        <td>
-                            <button id="validate-btn-{{ invoice.sinv }}" 
-                                    class="btn btn-validate" 
-                                    onclick="validateInvoice('{{ invoice.sinv }}')"
-                                    {% if invoice.status != 'Pending' %}disabled{% endif %}>
-                                Validate
-                            </button>
-                            <button id="post-btn-{{ invoice.sinv }}" 
-                                    class="btn btn-post ml-2" 
-                                    onclick="postInvoice('{{ invoice.sinv }}')"
-                                    {% if invoice.status != 'Valid' %}disabled{% endif %}>
-                                Post
-                            </button>
-                        </td>
-                        <td>
-                            <span id="validation-msg-{{ invoice.sinv }}" class="text-sm text-gray-600">{{ invoice.validation_response_text }}</span>
-                            <span id="post-msg-{{ invoice.sinv }}" class="text-sm text-gray-600">{{ invoice.post_response_text }}</span>
-                            <div id="download-links-{{ invoice.sinv }}" class="mt-2">
-                                {% if invoice.validation_response_file_url %}
-                                    <a href="{{ invoice.validation_response_file_url }}" target="_blank" class="btn btn-view text-sm">View Validation Res.</a>
-                                {% endif %}
-                                {% if invoice.qr_code_url %}
-                                    <a href="{{ invoice.qr_code_url }}" download class="btn btn-download text-sm ml-2">Download QR</a>
-                                {% endif %}
-                                {% if invoice.pdf_url %}
-                                    <a href="{{ invoice.pdf_url }}" download class="btn btn-download text-sm ml-2">Download PDF</a>
-                                {% endif %}
-                            </div>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-
-        <div id="global-messages" class="mt-8"></div>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="9" class="text-center py-5 text-muted">
+            <i class="bi bi-inbox fs-1 d-block mb-2"></i>No invoices yet.
+            <a href="{{ url_for('realtime_entry') }}">Create one</a> or
+            <a href="{{ url_for('upload_excel') }}">upload Excel</a>.
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
     </div>
+  </div>
+</div>
+<script>const _invoicePayloads={{ invoice_payloads_json|safe }};</script>
+{% endblock %}
 
-    <script>
-        // Function to display global messages (e.g., success, error from API calls)
-        function displayGlobalMessage(message, type) {
-            const globalMessagesDiv = document.getElementById('global-messages');
-            const messageElement = document.createElement('div');
-            messageElement.className = `message-box ${type} mt-4`;
-            messageElement.innerHTML = `<p>${message}</p>`;
-            globalMessagesDiv.appendChild(messageElement);
-            // Optionally, remove message after some time
-            setTimeout(() => {
-                messageElement.remove();
-            }, 7000); // Remove after 7 seconds
-        }
+{% block extra_scripts %}
+<script>
+function applyFilter(){
+  const q=document.getElementById('filterSearch').value.toLowerCase();
+  const st=document.getElementById('filterStatus').value;
+  let vis=0;
+  document.querySelectorAll('#invoiceBody tr[data-sinv]').forEach(row=>{
+    const ok=((!q||row.dataset.search.includes(q))&&(!st||row.dataset.status===st));
+    row.style.display=ok?'':'none'; if(ok)vis++;
+  });
+  document.getElementById('rowCount').textContent=`${vis} invoice(s)`;
+}
+document.getElementById('filterSearch').addEventListener('input',applyFilter);
+document.getElementById('filterStatus').addEventListener('change',applyFilter);
+applyFilter();
 
-        // Function to update a specific invoice row in the table
-        function updateInvoiceRow(sinv, data) {
-            const statusCell = document.getElementById(`status-${sinv}`);
-            const fbrInvoiceNoCell = document.getElementById(`fbr-invoice-no-${sinv}`);
-            const validateBtn = document.getElementById(`validate-btn-${sinv}`);
-            const postBtn = document.getElementById(`post-btn-${sinv}`);
-            const validationMsgSpan = document.getElementById(`validation-msg-${sinv}`);
-            const postMsgSpan = document.getElementById(`post-msg-${sinv}`);
-            const downloadLinksDiv = document.getElementById(`download-links-${sinv}`);
+document.getElementById('selectAll').addEventListener('change',function(){
+  document.querySelectorAll('.row-check').forEach(cb=>cb.checked=this.checked);
+});
 
-            // Update status
-            if (statusCell) {
-                // Ensure the class name is correctly formatted for "Skipped (Already Posted)"
-                let statusClass = data.status.toLowerCase().replace(' ', '-');
-                statusClass = statusClass.replace('(', '').replace(')', ''); // Remove parentheses for class name
-                statusCell.className = `status-${statusClass}`;
-                statusCell.innerText = data.status === 'success' ? (data.fbr_invoice_number ? 'Posted' : 'Valid') : data.status.replace('_', ' ');
-            }
+document.querySelectorAll('.btn-validate').forEach(btn=>{
+  btn.addEventListener('click',async()=>{
+    const sinv=btn.dataset.sinv;
+    btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm"></span>';
+    const res=await fetch(`/api/invoice/validate/${encodeURIComponent(sinv)}`,{method:'POST'});
+    const d=await res.json();
+    showToast(d.ok?`✅ Validated: ${sinv}`:`❌ ${d.message||'Failed'}`,d.ok?'success':'danger');
+    setTimeout(()=>location.reload(),1200);
+  });
+});
 
-            // Update FBR Invoice Number
-            if (fbrInvoiceNoCell && data.fbr_invoice_number && data.fbr_invoice_number !== 'N/A') {
-                fbrInvoiceNoCell.innerText = data.fbr_invoice_number;
-            }
+document.querySelectorAll('.btn-post').forEach(btn=>{
+  btn.addEventListener('click',async()=>{
+    const sinv=btn.dataset.sinv;
+    btn.disabled=true;btn.innerHTML='<span class="spinner-border spinner-border-sm"></span>';
+    const res=await fetch(`/api/invoice/post/${encodeURIComponent(sinv)}`,{method:'POST'});
+    const d=await res.json();
+    showToast(d.ok?`✅ Posted! FBR: ${d.fbr_invoice_no}`:`❌ ${d.error||'Failed'}`,d.ok?'success':'danger');
+    setTimeout(()=>location.reload(),1500);
+  });
+});
 
-            // Update messages and buttons based on validation/post result
-            if (data.message) {
-                if (data.status === 'validation_failed' || data.status === 'error') {
-                    if (validationMsgSpan) validationMsgSpan.innerText = data.message;
-                } else if (data.status === 'post_failed') {
-                    if (postMsgSpan) postMsgSpan.innerText = data.message;
-                } else if (data.status === 'success') {
-                    if (data.message.includes('Validation successful')) {
-                         if (validationMsgSpan) validationMsgSpan.innerText = data.message;
-                    } else {
-                        if (postMsgSpan) postMsgSpan.innerText = data.message;
-                    }
-                }
-            }
+document.querySelectorAll('.btn-delete').forEach(btn=>{
+  btn.addEventListener('click',async()=>{
+    if(!confirm('Delete this invoice permanently?'))return;
+    const sinv=btn.dataset.sinv;
+    const res=await fetch(`/api/invoice/delete/${encodeURIComponent(sinv)}`,{method:'POST'});
+    if((await res.json()).ok){btn.closest('tr').remove();applyFilter();}
+    else showToast('Delete failed','danger');
+  });
+});
 
-            // Enable/disable buttons
-            if (validateBtn) {
-                validateBtn.disabled = (data.status === 'success' || data.status === 'Valid' || data.status === 'Posted' || data.status === 'Skipped (Already Posted)');
-                // Remove spinner if present
-                validateBtn.innerHTML = 'Validate';
-            }
-            if (postBtn) {
-                postBtn.disabled = !(data.can_post && data.status === 'Valid');
-                 // Remove spinner if present
-                postBtn.innerHTML = 'Post';
-            }
+document.getElementById('btnBulkValidate').addEventListener('click',()=>{
+  const s=getSelected();if(!s.length){alert('Select invoices first.');return;}
+  runStream('/api/stream/validate-only',s,'Validating…');
+});
+document.getElementById('btnBulkPost').addEventListener('click',()=>{
+  const s=getSelected();if(!s.length){alert('Select invoices first.');return;}
+  runStream('/api/stream/validate-post',s,'Validating & posting…');
+});
 
-            // Add download links if available
-            if (downloadLinksDiv) {
-                downloadLinksDiv.innerHTML = ''; // Clear previous links
-                // Add Validation Response View Link (new)
-                if (data.validation_response_file_url) {
-                    const validationResLink = document.createElement('a');
-                    validationResLink.href = data.validation_response_file_url;
-                    validationResLink.target = "_blank"; // Open in new tab
-                    validationResLink.className = 'btn btn-view text-sm'; // Use new view button style
-                    validationResLink.innerText = 'View Validation Res.';
-                    downloadLinksDiv.appendChild(validationResLink);
-                }
-                if (data.qr_code_url) {
-                    const qrLink = document.createElement('a');
-                    qrLink.href = data.qr_code_url;
-                    qrLink.download = `${sinv}_qr.png`;
-                    qrLink.className = 'btn btn-download text-sm ml-2';
-                    qrLink.innerText = 'Download QR';
-                    downloadLinksDiv.appendChild(qrLink);
-                }
-                if (data.pdf_url) {
-                    const pdfLink = document.createElement('a');
-                    pdfLink.href = data.pdf_url;
-                    pdfLink.download = `${sinv}_invoice.pdf`;
-                    pdfLink.className = 'btn btn-download text-sm ml-2';
-                    pdfLink.innerText = 'Download PDF';
-                    downloadLinksDiv.appendChild(pdfLink);
-                }
-            }
-        }
+function getSelected(){return[...document.querySelectorAll('.row-check:checked')].map(c=>c.value);}
 
-        // Function to handle invoice validation
-        async function validateInvoice(sinv) {
-            const validateBtn = document.getElementById(`validate-btn-${sinv}`);
-            const validationMsgSpan = document.getElementById(`validation-msg-${sinv}`);
-            const postBtn = document.getElementById(`post-btn-${sinv}`);
+async function runStream(url,sinvs,label){
+  const prog=document.getElementById('bulkProgress');
+  const msg=document.getElementById('bulkMsg');
+  prog.classList.remove('d-none');msg.textContent=label;
+  const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sinvs})});
+  const reader=res.body.getReader();const dec=new TextDecoder();
+  let buf='';
+  while(true){
+    const{value,done}=await reader.read();
+    buf+=dec.decode(value||new Uint8Array(),{stream:!done});
+    const parts=buf.split('\n\n');buf=parts.pop();
+    for(const chunk of parts){
+      const line=chunk.replace(/^data: /,'');
+      try{const ev=JSON.parse(line);
+        if(ev.done){msg.textContent='Done! Reloading…';setTimeout(()=>location.reload(),800);return;}
+        msg.textContent=`${label} SINV ${ev.sinv} → ${ev.status}`;
+      }catch(_){}
+    }
+    if(done)break;
+  }
+}
 
-            validateBtn.disabled = true;
-            validateBtn.innerHTML = '<span class="spinner"></span> Validating...';
-            validationMsgSpan.innerText = ''; // Clear previous message
-            postBtn.disabled = true; // Disable post button during validation
-
-            try {
-                const response = await fetch(`/api/validate_invoice/${sinv}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-                const data = await response.json();
-
-                if (data.status === 'success') {
-                    displayGlobalMessage(`✅ SINV ${sinv}: ${data.message}`, 'success');
-                    updateInvoiceRow(sinv, {
-                        status: 'Valid',
-                        message: data.message,
-                        can_post: true,
-                        validation_response_file_url: data.validation_response_file_url // Pass the URL
-                    });
-                } else {
-                    displayGlobalMessage(`❌ SINV ${sinv}: ${data.message}`, 'error');
-                    updateInvoiceRow(sinv, {
-                        status: 'Validation Failed',
-                        message: data.message,
-                        can_post: false,
-                        validation_response_file_url: data.validation_response_file_url // Pass the URL even on failure
-                    });
-                }
-            } catch (error) {
-                console.error('Validation API error:', error);
-                displayGlobalMessage(`❌ SINV ${sinv}: Network or unexpected error during validation.`, 'error');
-                updateInvoiceRow(sinv, {
-                    status: 'Validation Failed',
-                    message: `Network error: ${error.message}`,
-                    can_post: false
-                });
-            } finally {
-                validateBtn.innerHTML = 'Validate';
-                // Re-enable validate button only if not successfully validated
-                if (document.getElementById(`status-${sinv}`).innerText !== 'Valid') {
-                    validateBtn.disabled = false;
-                }
-            }
-        }
-
-        // Function to handle invoice posting
-        async function postInvoice(sinv) {
-            const postBtn = document.getElementById(`post-btn-${sinv}`);
-            const postMsgSpan = document.getElementById(`post-msg-${sinv}`);
-            const validateBtn = document.getElementById(`validate-btn-${sinv}`);
-
-            postBtn.disabled = true;
-            postBtn.innerHTML = '<span class="spinner"></span> Posting...';
-            postMsgSpan.innerText = ''; // Clear previous message
-            validateBtn.disabled = true; // Disable validate button during posting
-
-            try {
-                const response = await fetch(`/api/post_invoice/${sinv}`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                });
-                const data = await response.json();
-
-                if (data.status === 'success') {
-                    displayGlobalMessage(`✅ SINV ${sinv}: Invoice posted! FBR No: ${data.fbr_invoice_number}`, 'success');
-                    updateInvoiceRow(sinv, {
-                        status: 'Posted',
-                        fbr_invoice_number: data.fbr_invoice_number,
-                        qr_code_url: data.qr_code_url,
-                        pdf_url: data.pdf_url,
-                        message: data.message // Use the full message from backend
-                    });
-                } else {
-                    displayGlobalMessage(`❌ SINV ${sinv}: ${data.message}`, 'error');
-                    updateInvoiceRow(sinv, {
-                        status: 'Post Failed',
-                        message: data.message
-                    });
-                }
-            } catch (error) {
-                console.error('Post API error:', error);
-                displayGlobalMessage(`❌ SINV ${sinv}: Network or unexpected error during posting.`, 'error');
-                updateInvoiceRow(sinv, {
-                    status: 'Post Failed',
-                    message: `Network error: ${error.message}`
-                });
-            } finally {
-                postBtn.innerHTML = 'Post';
-                // Keep post button disabled after attempt
-                postBtn.disabled = true;
-                validateBtn.disabled = true; // Ensure validate button remains disabled after post attempt
-            }
-        }
-
-        // Initial setup on page load
-        document.addEventListener('DOMContentLoaded', () => {
-            // Display initial messages if any (e.g., from Excel parsing errors)
-            const initialMessagesDiv = document.querySelector('.message-box.error');
-            if (initialMessagesDiv && initialMessagesDiv.children.length > 1) { // Check if there are actual messages
-                initialMessagesDiv.style.display = 'block';
-            } else if (initialMessagesDiv) {
-                initialMessagesDiv.style.display = 'none'; // Hide if no messages
-            }
-
-            // Automatically disable/enable buttons based on initial status
-            document.querySelectorAll('#invoice-table-body tr').forEach(row => {
-                const sinv = row.id.replace('invoice-row-', '');
-                const statusElement = document.getElementById(`status-${sinv}`);
-                const validateBtn = document.getElementById(`validate-btn-${sinv}`);
-                const postBtn = document.getElementById(`post-btn-${sinv}`);
-
-                if (statusElement && validateBtn && postBtn) {
-                    const currentStatus = statusElement.innerText.toLowerCase();
-                    if (currentStatus === 'pending') {
-                        validateBtn.disabled = false;
-                        postBtn.disabled = true;
-                    } else if (currentStatus === 'valid') {
-                        validateBtn.disabled = true;
-                        postBtn.disabled = false;
-                    } else if (currentStatus === 'posted' || currentStatus === 'validation failed' || currentStatus === 'post failed' || currentStatus === 'skipped (already posted)') {
-                        validateBtn.disabled = true;
-                        postBtn.disabled = true;
-                    }
-                }
-            });
-        });
-    </script>
-</body>
-</html>
+function showToast(msg,type){
+  const d=document.createElement('div');
+  d.className=`alert alert-${type} alert-dismissible fade show shadow-sm`;
+  d.innerHTML=msg+'<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+  document.querySelector('.flash-container').appendChild(d);
+  setTimeout(()=>bootstrap.Alert.getOrCreateInstance(d)?.close(),5000);
+}
+</script>
+<style>.spin{display:inline-block;animation:spin 1s linear infinite;}@keyframes spin{to{transform:rotate(360deg);}}</style>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Sign In — FBR Invoice{% endblock %}
+
+{% block content %}
+<div class="card shadow" style="width:100%;max-width:420px;">
+  <div class="card-body p-4 p-md-5">
+
+    <!-- Logo / Brand -->
+    <div class="text-center mb-4">
+      <div class="rounded-circle d-inline-flex align-items-center justify-content-center mb-3"
+           style="width:60px;height:60px;background:#1a6b3c;">
+        <i class="bi bi-receipt-cutoff text-white fs-3"></i>
+      </div>
+      <h4 class="fw-bold mb-0">FBR Invoice App</h4>
+      <p class="text-muted small mt-1">Sign in to your account</p>
+    </div>
+
+    <!-- Flash messages (inline) -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in messages %}
+      <div class="alert alert-{{ 'danger' if cat=='error' else 'success' }} py-2 small">
+        {{ msg }}
+      </div>
+      {% endfor %}
+    {% endwith %}
+
+    <form method="POST" action="{{ url_for('login_page') }}" novalidate>
+      <div class="mb-3">
+        <label for="email" class="form-label fw-semibold">Email address</label>
+        <div class="input-group">
+          <span class="input-group-text"><i class="bi bi-envelope"></i></span>
+          <input type="email" id="email" name="email" class="form-control"
+                 placeholder="you@company.pk" required autofocus>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label for="password" class="form-label fw-semibold">Password</label>
+        <div class="input-group">
+          <span class="input-group-text"><i class="bi bi-lock"></i></span>
+          <input type="password" id="password" name="password" class="form-control"
+                 placeholder="••••••••" required>
+          <button type="button" class="btn btn-outline-secondary"
+                  onclick="togglePw()" title="Show/hide password">
+            <i class="bi bi-eye" id="pwEyeIcon"></i>
+          </button>
+        </div>
+      </div>
+
+      <div class="d-grid mt-4">
+        <button type="submit" class="btn btn-primary btn-lg fw-semibold">
+          <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+        </button>
+      </div>
+    </form>
+
+    <hr class="my-4">
+    <p class="text-center text-muted small mb-0">
+      Don't have an account?
+      <a href="{{ url_for('signup') }}" class="fw-semibold text-decoration-none"
+         style="color:#1a6b3c;">Create one &rarr;</a>
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function togglePw() {
+  const inp  = document.getElementById('password');
+  const icon = document.getElementById('pwEyeIcon');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    icon.className = 'bi bi-eye-slash';
+  } else {
+    inp.type = 'password';
+    icon.className = 'bi bi-eye';
+  }
+}
+</script>
+{% endblock %}
