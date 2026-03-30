@@ -23,22 +23,6 @@ panel — all in a clean Bootstrap 5 UI.
 
 ---
 
-## 🔐 Default Login Credentials
-
-> **These are the built-in credentials used when no environment variables are set.**
-> Change them before deploying to production (see [Environment Variables](#-environment-variables)).
-
-| Role | Email | Password |
-|---|---|---|
-| **Super Admin** | `admin@fbr.local` | `Admin@12345` |
-| Regular users | *(sign up via `/signup`)* | *(chosen at signup)* |
-
-The Super Admin account is **not** stored in the database — it is authenticated directly
-from the `SUPER_ADMIN_EMAIL` and `SUPER_ADMIN_PASSWORD` environment variables (or the
-defaults above when those variables are not set).
-
----
-
 ## 🚀 Quick Start (Local Development)
 
 ### 1. Clone the repository
@@ -170,6 +154,10 @@ fbr-invoice-app/
 2. Click **Create Account** and fill in your seller details (NTN, name, province, address)
 3. Paste your **FBR API Token** (get it from FBR Taxpayer Portal → Digital Invoicing)
 4. Choose **Sandbox** for testing or **Production** for live submissions
+
+> **Super Admin login** (built-in, no signup needed):
+> Email `admin@fbr.local` · Password `Admin@12345`
+> *(Override via `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD` env vars — see [Environment Variables](#-environment-variables))*
 
 ### Submitting an Invoice
 1. Go to **Real-time Entry** from the sidebar
