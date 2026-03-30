@@ -1,0 +1,61 @@
+# ── Runtime data (never commit) ───────────────────────────────
+invoices.db
+invoices.db-shm
+invoices.db-wal
+*.db
+*.sqlite
+*.sqlite3
+
+# App-generated directories
+pdf/
+qr/
+auto_backups/
+uploads/
+static/responses/
+static/logos/
+buyers_per_user/
+
+# Secrets & config files
+.secret_key
+users.json
+admin_pw.json
+smtp_config.json
+serviceAccountKey.json
+*.pem
+*.key
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Environment variables
+.env
+.env.*
+
+# ── IDEs ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/

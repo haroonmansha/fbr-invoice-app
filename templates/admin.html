@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Admin Panel — FBR Invoice{% endblock %}
+{% block breadcrumb %}Admin Panel{% endblock %}
+
+{% block content %}
+<h4 class="fw-bold mb-1"><i class="bi bi-shield-lock me-2"></i>Admin Panel</h4>
+<p class="text-muted mb-4">Manage users and monitor system health.</p>
+
+<!-- Stats -->
+<div class="row g-3 mb-4">
+  <div class="col-sm-4">
+    <div class="stat-card" style="background:linear-gradient(135deg,#1a6b3c,#27ae60);">
+      <div class="stat-num">{{ users|length }}</div>
+      <div class="stat-lbl"><i class="bi bi-people me-1"></i>Registered Users</div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="stat-card" style="background:linear-gradient(135deg,#1e40af,#3b82f6);">
+      <div class="stat-num">{{ total_invoices }}</div>
+      <div class="stat-lbl"><i class="bi bi-file-earmark-text me-1"></i>Total Invoices</div>
+    </div>
+  </div>
+  <div class="col-sm-4">
+    <div class="stat-card" style="background:linear-gradient(135deg,#065f46,#10b981);">
+      <div class="stat-num">{{ posted_invoices }}</div>
+      <div class="stat-lbl"><i class="bi bi-check2-circle me-1"></i>Posted to FBR</div>
+    </div>
+  </div>
+</div>
+
+<!-- Scheduler status -->
+<div class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span><i class="bi bi-clock-history me-2"></i>Scheduler & Backup Status</span>
+    <button class="btn btn-sm btn-outline-secondary" id="btnRefreshStatus">
+      <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+  </div>
+  <div class="card-body">
+    <div id="schedulerStatus" class="text-muted small">
+      <span class="spinner-border spinner-border-sm me-2"></span>Loading…
+    </div>
+  </div>
+</div>
+
+<!-- Users table -->
+<div class="card">
+  <div class="card-header"><i class="bi bi-people me-2"></i>Registered Users</div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table mb-0">
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Seller Name</th>
+            <th>NTN</th>
+            <th>Environment</th>
+            <th>Token Set?</th>
+            <th>Joined</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td class="fw-semibold">{{ u.email }}</td>
+            <td>{{ u.seller_name or '—' }}</td>
+            <td>{{ u.seller_ntn or '—' }}</td>
+            <td>
+              <span class="badge {{ 'bg-warning text-dark' if u.fbr_env=='sandbox' else 'bg-danger' }}">
+                {{ u.fbr_env or 'sandbox' }}
+              </span>
+            </td>
+            <td>
+              {% if u.fbr_token %}
+              <span class="badge bg-success">Yes</span>
+              {% else %}
+              <span class="badge bg-secondary">No</span>
+              {% endif %}
+            </td>
+            <td><small class="text-muted">{{ u.created_at[:10] if u.created_at else '—' }}</small></td>
+            <td>
+              <div class="d-flex gap-1">
+                <a href="{{ url_for('admin_view_as', target_email=u.email) }}"
+                   class="btn btn-sm btn-outline-primary" title="View as this user">
+                  <i class="bi bi-eye"></i>
+                </a>
+                <form method="POST"
+                      action="{{ url_for('admin_delete_user', target_email=u.email) }}"
+                      onsubmit="return confirm('Delete user {{ u.email }} and ALL their data?');"
+                      class="d-inline">
+                  <button class="btn btn-sm btn-outline-danger" title="Delete user">
+                    <i class="bi bi-trash"></i>
+                  </button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="7" class="text-center py-4 text-muted">No registered users yet.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+async function loadStatus() {
+  const el = document.getElementById('schedulerStatus');
+  try {
+    const res  = await fetch('/admin/scheduler-status');
+    const data = await res.json();
+    el.innerHTML = `
+      <div class="row g-2">
+        <div class="col-sm-3">
+          <strong>Backup Directory</strong><br>
+          <code class="small">${data.backup_dir}</code>
+        </div>
+        <div class="col-sm-2">
+          <strong>Backup Count</strong><br>
+          <span class="badge bg-primary">${data.backup_count}</span>
+        </div>
+        <div class="col-sm-3">
+          <strong>Latest Backup</strong><br>
+          ${data.latest_backup || '<span class="text-muted">None yet</span>'}
+        </div>
+        <div class="col-sm-2">
+          <strong>Worker Thread</strong><br>
+          <span class="badge ${data.worker_alive ? 'bg-success' : 'bg-danger'}">
+            ${data.worker_alive ? '✅ Running' : '❌ Stopped'}
+          </span>
+        </div>
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<span class="text-danger">Failed to load status: ${e.message}</span>`;
+  }
+}
+loadStatus();
+document.getElementById('btnRefreshStatus').addEventListener('click', loadStatus);
+</script>
+{% endblock %}

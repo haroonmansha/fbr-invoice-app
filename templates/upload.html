@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Upload Excel — FBR Invoice{% endblock %}
+{% block breadcrumb %}Upload Excel{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-7">
+
+    <h4 class="fw-bold mb-1"><i class="bi bi-cloud-upload me-2"></i>Upload Excel File</h4>
+    <p class="text-muted mb-4">Import multiple invoices at once using an Excel spreadsheet.</p>
+
+    <div class="card">
+      <div class="card-body p-4">
+        <form method="POST" action="{{ url_for('upload_excel') }}" enctype="multipart/form-data">
+
+          <div class="mb-4">
+            <label class="form-label fw-semibold">
+              Select Excel File <span class="text-danger">*</span>
+            </label>
+            <input type="file" name="file" class="form-control" accept=".xlsx,.xls" required>
+            <div class="form-text">Supported formats: .xlsx, .xls (max 10 MB)</div>
+          </div>
+
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary btn-lg">
+              <i class="bi bi-cloud-upload me-2"></i>Upload &amp; Import
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Column reference -->
+    <div class="card mt-4">
+      <div class="card-header fw-semibold">
+        <i class="bi bi-table me-2"></i>Required Excel Columns
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead class="table-light">
+              <tr><th>Column Name</th><th>Required?</th><th>Description</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="fw-semibold">SINV</td><td><span class="text-danger">Yes</span></td><td>Your invoice serial number (groups items per invoice)</td></tr>
+              <tr><td>invoiceDate</td><td>Yes</td><td>Invoice date (YYYY-MM-DD or Excel date)</td></tr>
+              <tr><td>invoiceType</td><td>No</td><td>Sale Invoice / Debit Note / Credit Note</td></tr>
+              <tr><td>buyerNTNCNIC</td><td>No</td><td>Buyer NTN or CNIC</td></tr>
+              <tr><td>buyerBusinessName</td><td>No</td><td>Buyer's company name</td></tr>
+              <tr><td>buyerProvince</td><td>No</td><td>Punjab / Sindh / KPK …</td></tr>
+              <tr><td>buyerAddress</td><td>No</td><td>Buyer's address</td></tr>
+              <tr><td>buyerRegistrationType</td><td>No</td><td>Registered / Un-Registered / Final Consumer</td></tr>
+              <tr><td>scenarioId</td><td>No</td><td>Sandbox scenario ID (default: SN001)</td></tr>
+              <tr><td>hsCode</td><td>No</td><td>HS Code of item</td></tr>
+              <tr><td class="fw-semibold">productDescription</td><td><span class="text-danger">Yes</span></td><td>Item description</td></tr>
+              <tr><td>uoM</td><td>No</td><td>Unit of Measure (EA, KG, LTR…)</td></tr>
+              <tr><td class="fw-semibold">quantity</td><td><span class="text-danger">Yes</span></td><td>Quantity of item</td></tr>
+              <tr><td>valueSalesExcludingST</td><td>No</td><td>Value excluding sales tax</td></tr>
+              <tr><td>rate</td><td>No</td><td>Tax rate (e.g. 17 or 17%)</td></tr>
+              <tr><td>salesTaxApplicable</td><td>No</td><td>Sales tax amount</td></tr>
+              <tr><td>discount</td><td>No</td><td>Discount amount</td></tr>
+              <tr><td>furtherTax</td><td>No</td><td>Further tax amount</td></tr>
+              <tr><td>fedPayable</td><td>No</td><td>FED payable amount</td></tr>
+              <tr><td>salesTaxWithheldAtSource</td><td>No</td><td>WHT on sales tax</td></tr>
+              <tr><td>sroScheduleNo</td><td>No</td><td>SRO schedule number</td></tr>
+              <tr><td>sroItemSerialNo</td><td>No</td><td>SRO item serial number</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Seller info notice -->
+    <div class="alert alert-info mt-3 small">
+      <i class="bi bi-info-circle me-2"></i>
+      <strong>Seller details</strong> (NTN, name, province, address) are taken automatically from
+      <a href="{{ url_for('user_profile') }}">your profile</a> — you do not need to include them
+      in the Excel file.
+    </div>
+
+  </div>
+</div>
+{% endblock %}

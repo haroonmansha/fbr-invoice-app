@@ -1,0 +1,631 @@
+{% extends "base.html" %}
+{% block title %}Real-time Entry — FBR Invoice{% endblock %}
+{% block breadcrumb %}Real-time Invoice Entry{% endblock %}
+
+{% block extra_head %}
+<style>
+.field-label{font-size:.78rem;font-weight:600;color:#374151;margin-bottom:.25rem;}
+.section-hdr{background:#f8fafc;border-left:3px solid #1a6b3c;padding:.5rem .8rem;
+             font-weight:700;font-size:.85rem;text-transform:uppercase;letter-spacing:.04em;
+             color:#1a6b3c;margin-bottom:1rem;border-radius:0 .3rem .3rem 0;}
+.item-row td{padding:.35rem .4rem!important;vertical-align:middle;}
+.item-row input,.item-row select{font-size:.8rem;padding:.25rem .4rem;}
+.req::after{content:" *";color:#dc2626;}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h4 class="fw-bold mb-0">
+      <i class="bi bi-lightning-fill text-warning me-2"></i>
+      {% if edit_sinv %}Edit Invoice: {{ edit_sinv }}{% else %}New Real-time Invoice{% endif %}
+    </h4>
+    <p class="text-muted small mb-0">
+      Environment:
+      {% if is_sandbox %}
+      <span class="badge bg-warning text-dark">🧪 Sandbox</span>
+      {% else %}
+      <span class="badge bg-danger">🚀 Production</span>
+      {% endif %}
+    </p>
+  </div>
+  <a href="{{ url_for('invoices_page') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>Back
+  </a>
+</div>
+
+<!-- ── Success panel (hidden until FBR responds) ──────── -->
+<div id="successPanel" class="alert alert-success d-none mb-3">
+  <h6 class="fw-bold"><i class="bi bi-check-circle-fill me-2"></i>Invoice Posted Successfully!</h6>
+  <div><strong>FBR Invoice No:</strong> <span id="resultFbrNo" class="fs-5 fw-bold text-success"></span></div>
+  <div class="mt-2">
+    <a id="resultPdfLink" href="#" class="btn btn-sm btn-outline-success d-none" target="_blank">
+      <i class="bi bi-file-pdf me-1"></i>Download PDF
+    </a>
+  </div>
+</div>
+
+<!-- ── Error panel ────────────────────────────────────── -->
+<div id="errorPanel" class="alert alert-danger d-none mb-3">
+  <h6 class="fw-bold"><i class="bi bi-x-circle-fill me-2"></i>Submission Failed</h6>
+  <ul id="errorList" class="mb-0 small"></ul>
+</div>
+
+<!-- ── Duplicate warning modal ────────────────────────── -->
+<div class="modal fade" id="dupModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-exclamation-triangle-fill text-warning me-2"></i>Duplicate SINV</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body small">
+        Invoice <strong id="dupSinv"></strong> already exists. Do you want to overwrite / repost it?
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-sm btn-danger" id="dupConfirmBtn">Yes, Repost</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<form id="invoiceForm" novalidate>
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 1 — Invoice Header
+════════════════════════════════════════════════════════ -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="section-hdr"><i class="bi bi-info-circle me-1"></i>Invoice Header</div>
+    <div class="row g-3">
+      <div class="col-sm-3">
+        <label class="field-label req">SINV (Serial No)</label>
+        <input type="text" id="iSINV" class="form-control" placeholder="e.g. INV-001" required>
+        <div class="form-text">Your internal invoice number.</div>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label req">Invoice Date</label>
+        <input type="date" id="iDate" class="form-control" required>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label req">Invoice Type</label>
+        <select id="iType" class="form-select">
+          <option>Sale Invoice</option>
+          <option>Debit Note</option>
+          <option>Credit Note</option>
+        </select>
+      </div>
+      {% if is_sandbox %}
+      <div class="col-sm-3">
+        <label class="field-label">Scenario ID (Sandbox)</label>
+        <input type="text" id="iScenario" class="form-control" value="SN001" placeholder="SN001">
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 2 — Seller (read-only from session)
+════════════════════════════════════════════════════════ -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="section-hdr"><i class="bi bi-building me-1"></i>Seller Information (from your profile)</div>
+    <div class="row g-3">
+      <div class="col-sm-3">
+        <label class="field-label">NTN / CNIC</label>
+        <input type="text" id="sNTN" class="form-control bg-light"
+               value="{{ user.seller_ntn }}" readonly>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Business Name</label>
+        <input type="text" id="sName" class="form-control bg-light"
+               value="{{ user.seller_name }}" readonly>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Province</label>
+        <input type="text" id="sProvince" class="form-control bg-light"
+               value="{{ user.seller_province }}" readonly>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Address</label>
+        <input type="text" id="sAddress" class="form-control bg-light"
+               value="{{ user.seller_address }}" readonly>
+      </div>
+    </div>
+    <div class="mt-2">
+      <small class="text-muted">
+        <i class="bi bi-info-circle me-1"></i>
+        To update seller details, go to <a href="{{ url_for('user_profile') }}">your profile</a>.
+      </small>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 3 — Buyer
+════════════════════════════════════════════════════════ -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="section-hdr"><i class="bi bi-person-vcard me-1"></i>Buyer Information</div>
+
+    <!-- Autocomplete search -->
+    <div class="mb-3 position-relative">
+      <label class="field-label">Quick Search (saved buyers)</label>
+      <div class="input-group">
+        <span class="input-group-text"><i class="bi bi-search"></i></span>
+        <input type="text" id="buyerSearch" class="form-control"
+               placeholder="Type NTN, CNIC, or business name…">
+        <button type="button" class="btn btn-outline-secondary" id="clearBuyer" title="Clear buyer">
+          <i class="bi bi-x"></i>
+        </button>
+      </div>
+      <div id="buyerSuggestions" class="list-group position-absolute w-100 shadow" style="z-index:1000;top:100%;display:none;"></div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-sm-3">
+        <label class="field-label req">Buyer NTN / CNIC</label>
+        <input type="text" id="bNTN" class="form-control" placeholder="1234567-8" required>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Business Name</label>
+        <input type="text" id="bName" class="form-control" placeholder="Buyer Company">
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Province</label>
+        <select id="bProvince" class="form-select">
+          {% for p in ['Punjab','Sindh','KPK','Balochistan','Islamabad','AJK','GB','FATA'] %}
+          <option>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">Registration Type</label>
+        <select id="bRegType" class="form-select">
+          <option>Registered</option>
+          <option>Un-Registered</option>
+          <option>Final Consumer</option>
+          <option>AOP</option>
+          <option>Individual</option>
+        </select>
+      </div>
+      <div class="col-sm-6">
+        <label class="field-label">Address</label>
+        <input type="text" id="bAddress" class="form-control" placeholder="Street, City">
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">STRN</label>
+        <input type="text" id="bSTRN" class="form-control" placeholder="Sales Tax Reg No">
+      </div>
+      <div class="col-sm-3 d-flex align-items-end">
+        <button type="button" class="btn btn-outline-primary btn-sm w-100" id="saveBuyerBtn">
+          <i class="bi bi-bookmark-plus me-1"></i>Save Buyer
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 4 — Invoice Items
+════════════════════════════════════════════════════════ -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <div class="section-hdr mb-0"><i class="bi bi-list-ol me-1"></i>Invoice Items</div>
+      <button type="button" class="btn btn-sm btn-outline-primary" id="addRowBtn">
+        <i class="bi bi-plus-lg me-1"></i>Add Item
+      </button>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-bordered table-sm" id="itemsTable">
+        <thead class="table-light">
+          <tr>
+            <th style="min-width:40px">#</th>
+            <th style="min-width:110px">HS Code</th>
+            <th style="min-width:160px">Description <span class="text-danger">*</span></th>
+            <th style="min-width:70px">UoM</th>
+            <th style="min-width:80px">Qty <span class="text-danger">*</span></th>
+            <th style="min-width:100px">Value Excl ST</th>
+            <th style="min-width:80px">Rate %</th>
+            <th style="min-width:100px">Sales Tax</th>
+            <th style="min-width:80px">Discount</th>
+            <th style="min-width:80px">Further Tax</th>
+            <th style="min-width:80px">FED</th>
+            <th style="min-width:90px">ST Withheld</th>
+            <th style="min-width:80px">Extra Tax</th>
+            <th style="min-width:100px">Fixed Notified</th>
+            <th style="min-width:80px">SRO Sched</th>
+            <th style="min-width:70px">SRO Item</th>
+            <th style="min-width:44px"></th>
+          </tr>
+        </thead>
+        <tbody id="itemsBody">
+          <!-- rows injected by JS -->
+        </tbody>
+      </table>
+    </div>
+    <div class="text-end">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="addRowBtn2">
+        <i class="bi bi-plus-lg me-1"></i>Add Item
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════
+     SECTION 5 — WHT & Totals
+════════════════════════════════════════════════════════ -->
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="section-hdr"><i class="bi bi-calculator me-1"></i>Withholding Tax</div>
+    <div class="row g-3">
+      <div class="col-sm-3">
+        <label class="field-label">WHT 236G Amount</label>
+        <input type="number" id="wht236G" class="form-control" value="0" min="0" step="0.01">
+      </div>
+      <div class="col-sm-3">
+        <label class="field-label">WHT 236H Amount</label>
+        <input type="number" id="wht236H" class="form-control" value="0" min="0" step="0.01">
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Submit ──────────────────────────────────────────── -->
+<div class="d-flex gap-2 justify-content-end mb-4">
+  <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+    <i class="bi bi-arrow-counterclockwise me-1"></i>Reset
+  </button>
+  <button type="submit" class="btn btn-primary btn-lg px-5" id="submitBtn">
+    <i class="bi bi-send me-2"></i>
+    {% if edit_sinv %}Update &amp; Re-post{% else %}Validate &amp; Post to FBR{% endif %}
+  </button>
+</div>
+</form>
+
+<!-- Stored buyers for autocomplete -->
+<script>
+const _savedBuyers = {{ buyers | tojson | safe }};
+const _editInvoice = {{ edit_invoice_json | safe }};
+const _isSandbox   = {{ 'true' if is_sandbox else 'false' }};
+const _editSinv    = {{ edit_sinv | tojson | safe }};
+</script>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// ─── Item Row Template ────────────────────────────────────
+let rowIdx = 0;
+function newItemRow(data={}) {
+  rowIdx++;
+  const n = rowIdx;
+  const tr = document.createElement('tr');
+  tr.className = 'item-row';
+  tr.dataset.row = n;
+  tr.innerHTML = `
+    <td class="text-muted small">${n}</td>
+    <td><input type="text"   class="form-control" name="hsCode"        value="${esc(data.hsCode||'')}"></td>
+    <td><input type="text"   class="form-control" name="productDescription" value="${esc(data.productDescription||'')}" required></td>
+    <td><input type="text"   class="form-control" name="uoM"           value="${esc(data.uoM||'EA')}"></td>
+    <td><input type="number" class="form-control" name="quantity"      value="${data.quantity||1}"    min="0" step="any" required></td>
+    <td><input type="number" class="form-control" name="valueSalesExcludingST" value="${data.valueSalesExcludingST||0}" min="0" step="0.01" oninput="calcST(this)"></td>
+    <td>
+      <select class="form-select" name="rate" onchange="calcST(this)">
+        ${[0,5,8,10,13,17,18,20].map(r=>`<option value="${r}%" ${(data.rate||'0%')===r+'%'?'selected':''}>${r}%</option>`).join('')}
+      </select>
+    </td>
+    <td><input type="number" class="form-control" name="salesTaxApplicable" value="${data.salesTaxApplicable||0}" min="0" step="0.01"></td>
+    <td><input type="number" class="form-control" name="discount"     value="${data.discount||0}"      min="0" step="0.01"></td>
+    <td><input type="number" class="form-control" name="furtherTax"   value="${data.furtherTax||0}"    min="0" step="0.01"></td>
+    <td><input type="number" class="form-control" name="fedPayable"   value="${data.fedPayable||0}"    min="0" step="0.01"></td>
+    <td><input type="number" class="form-control" name="salesTaxWithheldAtSource" value="${data.salesTaxWithheldAtSource||0}" min="0" step="0.01"></td>
+    <td><input type="text"   class="form-control" name="extraTax"     value="${esc(data.extraTax||'')}"></td>
+    <td><input type="number" class="form-control" name="fixedNotifiedValueOrRetailPrice" value="${data.fixedNotifiedValueOrRetailPrice||0}" min="0" step="0.01"></td>
+    <td><input type="text"   class="form-control" name="sroScheduleNo" value="${esc(data.sroScheduleNo||'')}"></td>
+    <td><input type="text"   class="form-control" name="sroItemSerialNo" value="${esc(data.sroItemSerialNo||'')}"></td>
+    <td><button type="button" class="btn btn-outline-danger btn-sm" onclick="removeRow(this)" title="Remove row"><i class="bi bi-dash"></i></button></td>`;
+  return tr;
+}
+
+function esc(v){ return String(v).replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
+
+function removeRow(btn) {
+  const tbody = document.getElementById('itemsBody');
+  if (tbody.children.length <= 1) { alert('At least one item is required.'); return; }
+  btn.closest('tr').remove();
+  renumberRows();
+}
+
+function renumberRows() {
+  document.querySelectorAll('#itemsBody tr').forEach((tr,i)=>{
+    tr.cells[0].textContent = i+1;
+  });
+}
+
+function calcST(input) {
+  const row   = input.closest('tr');
+  const val   = parseFloat(row.querySelector('[name=valueSalesExcludingST]').value) || 0;
+  const rateS = row.querySelector('[name=rate]').value.replace('%','');
+  const rate  = parseFloat(rateS) / 100;
+  const st    = +(val * rate).toFixed(2);
+  row.querySelector('[name=salesTaxApplicable]').value = st;
+}
+
+// ─── Add row buttons ──────────────────────────────────────
+document.getElementById('addRowBtn').addEventListener('click',  ()=>{ document.getElementById('itemsBody').appendChild(newItemRow()); });
+document.getElementById('addRowBtn2').addEventListener('click', ()=>{ document.getElementById('itemsBody').appendChild(newItemRow()); });
+
+// ─── Init with one row ────────────────────────────────────
+document.getElementById('itemsBody').appendChild(newItemRow());
+
+// ─── Pre-fill today's date ────────────────────────────────
+document.getElementById('iDate').value = new Date().toISOString().slice(0,10);
+
+// ─── Buyer autocomplete ───────────────────────────────────
+const buyerSearchEl   = document.getElementById('buyerSearch');
+const buyerSuggestEl  = document.getElementById('buyerSuggestions');
+
+buyerSearchEl.addEventListener('input', async function() {
+  const q = this.value.trim().toLowerCase();
+  buyerSuggestEl.innerHTML = '';
+  if (!q) { buyerSuggestEl.style.display='none'; return; }
+  const matches = _savedBuyers.filter(b =>
+    (b.ntn_cnic||'').toLowerCase().includes(q) ||
+    (b.business_name||'').toLowerCase().includes(q)
+  ).slice(0,8);
+  if (!matches.length) {
+    // Live DB search
+    const res = await fetch(`/api/buyers?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    renderSuggestions(data);
+  } else {
+    renderSuggestions(matches);
+  }
+});
+
+function renderSuggestions(buyers) {
+  buyerSuggestEl.innerHTML = '';
+  if (!buyers.length) { buyerSuggestEl.style.display='none'; return; }
+  buyers.forEach(b => {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'list-group-item list-group-item-action py-2';
+    a.innerHTML = `<strong>${b.ntn_cnic||''}</strong> — ${b.business_name||''} <small class="text-muted">(${b.province||''})</small>`;
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      fillBuyer(b);
+      buyerSuggestEl.style.display='none';
+      buyerSearchEl.value = b.business_name || b.ntn_cnic;
+    });
+    buyerSuggestEl.appendChild(a);
+  });
+  buyerSuggestEl.style.display='block';
+}
+
+document.addEventListener('click', e => {
+  if (!buyerSearchEl.contains(e.target) && !buyerSuggestEl.contains(e.target))
+    buyerSuggestEl.style.display='none';
+});
+
+function fillBuyer(b) {
+  document.getElementById('bNTN').value      = b.ntn_cnic      || '';
+  document.getElementById('bName').value     = b.business_name || '';
+  document.getElementById('bAddress').value  = b.address       || '';
+  document.getElementById('bSTRN').value     = b.strn          || '';
+  setSelectByValue('bProvince', b.province);
+  setSelectByValue('bRegType',  b.reg_type);
+}
+
+document.getElementById('clearBuyer').addEventListener('click', ()=>{
+  buyerSearchEl.value='';
+  ['bNTN','bName','bAddress','bSTRN'].forEach(id=>document.getElementById(id).value='');
+});
+
+// ─── Save buyer ───────────────────────────────────────────
+document.getElementById('saveBuyerBtn').addEventListener('click', async () => {
+  const ntn = document.getElementById('bNTN').value.trim();
+  if (!ntn) { alert('Buyer NTN/CNIC is required to save.'); return; }
+  const res = await fetch('/api/buyers/save', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      ntn_cnic:      ntn,
+      business_name: document.getElementById('bName').value,
+      province:      document.getElementById('bProvince').value,
+      address:       document.getElementById('bAddress').value,
+      reg_type:      document.getElementById('bRegType').value,
+      strn:          document.getElementById('bSTRN').value,
+    })
+  });
+  const d = await res.json();
+  if (d.ok) showToast('Buyer saved ✅', 'success');
+  else      showToast(`Save failed: ${d.error}`, 'danger');
+});
+
+// ─── Collect form data ────────────────────────────────────
+function collectPayload(force=false) {
+  const sinv = document.getElementById('iSINV').value.trim();
+  if (!sinv) { showToast('SINV is required.','danger'); return null; }
+
+  const items = [];
+  let valid = true;
+  document.querySelectorAll('#itemsBody tr.item-row').forEach(row => {
+    const get = n => row.querySelector(`[name=${n}]`);
+    const desc = get('productDescription').value.trim();
+    const qty  = parseFloat(get('quantity').value) || 0;
+    if (!desc || qty <= 0) { valid=false; return; }
+    items.push({
+      hsCode:                          get('hsCode').value.trim(),
+      productDescription:              desc,
+      uoM:                             get('uoM').value.trim() || 'EA',
+      quantity:                        qty,
+      valueSalesExcludingST:           parseFloat(get('valueSalesExcludingST').value)||0,
+      rate:                            get('rate').value,
+      salesTaxApplicable:              parseFloat(get('salesTaxApplicable').value)||0,
+      discount:                        parseFloat(get('discount').value)||0,
+      furtherTax:                      parseFloat(get('furtherTax').value)||0,
+      fedPayable:                      parseFloat(get('fedPayable').value)||0,
+      salesTaxWithheldAtSource:        parseFloat(get('salesTaxWithheldAtSource').value)||0,
+      extraTax:                        get('extraTax').value.trim(),
+      fixedNotifiedValueOrRetailPrice: parseFloat(get('fixedNotifiedValueOrRetailPrice').value)||0,
+      sroScheduleNo:                   get('sroScheduleNo').value.trim(),
+      sroItemSerialNo:                 get('sroItemSerialNo').value.trim(),
+    });
+  });
+
+  if (!valid || !items.length) {
+    showToast('Each item needs a description and quantity > 0.','danger');
+    return null;
+  }
+
+  return {
+    _sinv_display:          sinv,
+    _force:                 force,
+    invoiceType:            document.getElementById('iType').value,
+    invoiceDate:            document.getElementById('iDate').value,
+    scenarioId:             (_isSandbox ? document.getElementById('iScenario')?.value || 'SN001' : undefined),
+    sellerNTNCNIC:          document.getElementById('sNTN').value,
+    sellerBusinessName:     document.getElementById('sName').value,
+    sellerProvince:         document.getElementById('sProvince').value,
+    sellerAddress:          document.getElementById('sAddress').value,
+    buyerNTNCNIC:           document.getElementById('bNTN').value.trim(),
+    buyerBusinessName:      document.getElementById('bName').value.trim(),
+    buyerProvince:          document.getElementById('bProvince').value,
+    buyerAddress:           document.getElementById('bAddress').value.trim(),
+    buyerRegistrationType:  document.getElementById('bRegType').value,
+    buyerSTRN:              document.getElementById('bSTRN').value.trim(),
+    wht236G:                parseFloat(document.getElementById('wht236G').value)||0,
+    wht236H:                parseFloat(document.getElementById('wht236H').value)||0,
+    items,
+  };
+}
+
+// ─── Submit ───────────────────────────────────────────────
+document.getElementById('invoiceForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  await doSubmit(false);
+});
+
+async function doSubmit(force=false) {
+  const payload = collectPayload(force);
+  if (!payload) return;
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Submitting…';
+  document.getElementById('successPanel').classList.add('d-none');
+  document.getElementById('errorPanel').classList.add('d-none');
+
+  try {
+    const res  = await fetch('/api/realtime/submit', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      document.getElementById('resultFbrNo').textContent = data.fbr_invoice_no;
+      if (data.pdf_url) {
+        const link = document.getElementById('resultPdfLink');
+        link.href = data.pdf_url;
+        link.classList.remove('d-none');
+      }
+      document.getElementById('successPanel').classList.remove('d-none');
+      document.getElementById('successPanel').scrollIntoView({behavior:'smooth'});
+      // Do NOT reset form — let user verify before clearing
+    } else if (data.validation_errors) {
+      const ul = document.getElementById('errorList');
+      ul.innerHTML = data.validation_errors.map(er=>
+        `<li>${typeof er==='object'?JSON.stringify(er):er}</li>`).join('');
+      document.getElementById('errorPanel').classList.remove('d-none');
+      document.getElementById('errorPanel').scrollIntoView({behavior:'smooth'});
+    } else {
+      // Could be duplicate — show modal
+      if (res.status === 409 || (data.error && data.error.toLowerCase().includes('duplicate'))) {
+        document.getElementById('dupSinv').textContent = payload._sinv_display;
+        const modal = new bootstrap.Modal(document.getElementById('dupModal'));
+        modal.show();
+        document.getElementById('dupConfirmBtn').onclick = async () => {
+          modal.hide();
+          await doSubmit(true);
+        };
+      } else {
+        const ul = document.getElementById('errorList');
+        ul.innerHTML = `<li>${data.error || 'An unexpected error occurred.'}</li>`;
+        document.getElementById('errorPanel').classList.remove('d-none');
+      }
+    }
+  } catch(err) {
+    const ul = document.getElementById('errorList');
+    ul.innerHTML = `<li>Network error: ${err.message}</li>`;
+    document.getElementById('errorPanel').classList.remove('d-none');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-send me-2"></i>Validate &amp; Post to FBR';
+  }
+}
+
+// ─── Reset ────────────────────────────────────────────────
+function resetForm() {
+  if (!confirm('Clear the form? All unsaved data will be lost.')) return;
+  document.getElementById('iSINV').value = '';
+  document.getElementById('iDate').value = new Date().toISOString().slice(0,10);
+  document.getElementById('iType').selectedIndex = 0;
+  ['bNTN','bName','bAddress','bSTRN'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('wht236G').value = 0;
+  document.getElementById('wht236H').value = 0;
+  document.getElementById('itemsBody').innerHTML = '';
+  document.getElementById('itemsBody').appendChild(newItemRow());
+  document.getElementById('successPanel').classList.add('d-none');
+  document.getElementById('errorPanel').classList.add('d-none');
+}
+
+// ─── Pre-fill edit invoice ────────────────────────────────
+if (_editInvoice) {
+  document.getElementById('iSINV').value = _editInvoice._sinv_display || _editSinv || '';
+  if (_editInvoice.invoiceDate)
+    document.getElementById('iDate').value = _editInvoice.invoiceDate;
+  setSelectByValue('iType', _editInvoice.invoiceType);
+  if (_isSandbox && document.getElementById('iScenario'))
+    document.getElementById('iScenario').value = _editInvoice.scenarioId || 'SN001';
+  // Buyer
+  document.getElementById('bNTN').value     = _editInvoice.buyerNTNCNIC || '';
+  document.getElementById('bName').value    = _editInvoice.buyerBusinessName || '';
+  document.getElementById('bAddress').value = _editInvoice.buyerAddress || '';
+  document.getElementById('bSTRN').value    = _editInvoice.buyerSTRN || '';
+  setSelectByValue('bProvince', _editInvoice.buyerProvince);
+  setSelectByValue('bRegType',  _editInvoice.buyerRegistrationType);
+  // WHT
+  document.getElementById('wht236G').value  = _editInvoice.wht236G || 0;
+  document.getElementById('wht236H').value  = _editInvoice.wht236H || 0;
+  // Items
+  if (Array.isArray(_editInvoice.items) && _editInvoice.items.length) {
+    document.getElementById('itemsBody').innerHTML = '';
+    _editInvoice.items.forEach(item => {
+      document.getElementById('itemsBody').appendChild(newItemRow(item));
+    });
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────
+function setSelectByValue(id, val) {
+  const sel = document.getElementById(id);
+  if (!sel || !val) return;
+  for (let opt of sel.options) {
+    if (opt.value === val || opt.text === val) { sel.value = opt.value; return; }
+  }
+}
+
+function showToast(msg, type='info') {
+  const d = document.createElement('div');
+  d.className = `alert alert-${type} alert-dismissible fade show shadow-sm`;
+  d.innerHTML = msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+  document.querySelector('.flash-container').appendChild(d);
+  setTimeout(()=>bootstrap.Alert.getOrCreateInstance(d)?.close(), 5000);
+}
+</script>
+{% endblock %}

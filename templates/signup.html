@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Create Account — FBR Invoice{% endblock %}
+
+{% block content %}
+<div class="card shadow" style="width:100%;max-width:560px;">
+  <div class="card-body p-4 p-md-5">
+
+    <div class="text-center mb-4">
+      <div class="rounded-circle d-inline-flex align-items-center justify-content-center mb-3"
+           style="width:60px;height:60px;background:#1a6b3c;">
+        <i class="bi bi-person-plus text-white fs-3"></i>
+      </div>
+      <h4 class="fw-bold mb-0">Create Your Account</h4>
+      <p class="text-muted small mt-1">Fill in your seller details to get started</p>
+    </div>
+
+    <form method="POST" action="{{ url_for('signup') }}" novalidate>
+
+      <!-- ── Login credentials ───────────────────────────── -->
+      <h6 class="text-uppercase text-muted fw-semibold small mb-3">
+        <i class="bi bi-shield-lock me-1"></i> Login Credentials
+      </h6>
+
+      <div class="mb-3">
+        <label for="email" class="form-label fw-semibold">Email <span class="text-danger">*</span></label>
+        <input type="email" id="email" name="email" class="form-control"
+               value="{{ form.get('email','') }}" placeholder="you@company.pk" required autofocus>
+      </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-sm-6">
+          <label for="password" class="form-label fw-semibold">Password <span class="text-danger">*</span></label>
+          <input type="password" id="password" name="password" class="form-control"
+                 placeholder="Min 8 characters" required minlength="8">
+          <div class="form-text">At least 8 characters.</div>
+        </div>
+        <div class="col-sm-6">
+          <label for="confirm_pw" class="form-label fw-semibold">Confirm Password <span class="text-danger">*</span></label>
+          <input type="password" id="confirm_pw" name="confirm_password" class="form-control"
+                 placeholder="Repeat password" required>
+        </div>
+      </div>
+
+      <!-- ── Seller information ──────────────────────────── -->
+      <h6 class="text-uppercase text-muted fw-semibold small mb-3">
+        <i class="bi bi-building me-1"></i> Seller / Business Information
+      </h6>
+
+      <div class="row g-3 mb-3">
+        <div class="col-sm-6">
+          <label for="seller_ntn" class="form-label fw-semibold">Seller NTN <span class="text-danger">*</span></label>
+          <input type="text" id="seller_ntn" name="seller_ntn" class="form-control"
+                 value="{{ form.get('seller_ntn','') }}" placeholder="e.g. 1234567-8" required>
+        </div>
+        <div class="col-sm-6">
+          <label for="seller_name" class="form-label fw-semibold">Business Name <span class="text-danger">*</span></label>
+          <input type="text" id="seller_name" name="seller_name" class="form-control"
+                 value="{{ form.get('seller_name','') }}" placeholder="Your company name" required>
+        </div>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-sm-6">
+          <label for="seller_province" class="form-label fw-semibold">Province</label>
+          <select id="seller_province" name="seller_province" class="form-select">
+            {% set provinces = ['Punjab','Sindh','KPK','Balochistan','Islamabad','AJK','GB','FATA'] %}
+            {% for p in provinces %}
+            <option value="{{ p }}" {{ 'selected' if form.get('seller_province','')==p }}>{{ p }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-sm-6">
+          <label for="fbr_env" class="form-label fw-semibold">FBR Environment</label>
+          <select id="fbr_env" name="fbr_env" class="form-select">
+            <option value="sandbox" {{ 'selected' if form.get('fbr_env','sandbox')=='sandbox' }}>
+              🧪 Sandbox (Testing)
+            </option>
+            <option value="production" {{ 'selected' if form.get('fbr_env','')=='production' }}>
+              🚀 Production (Live)
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <div class="mb-3">
+        <label for="seller_address" class="form-label fw-semibold">Seller Address</label>
+        <input type="text" id="seller_address" name="seller_address" class="form-control"
+               value="{{ form.get('seller_address','') }}" placeholder="Street, City, Pakistan">
+      </div>
+
+      <!-- ── FBR Token ────────────────────────────────────── -->
+      <h6 class="text-uppercase text-muted fw-semibold small mb-3 mt-4">
+        <i class="bi bi-key me-1"></i> FBR API Token
+      </h6>
+      <div class="mb-4">
+        <label for="fbr_token" class="form-label fw-semibold">FBR Bearer Token</label>
+        <textarea id="fbr_token" name="fbr_token" class="form-control" rows="2"
+                  placeholder="Paste your FBR API token here (can be updated later in Profile)">{{ form.get('fbr_token','') }}</textarea>
+        <div class="form-text">
+          Obtain from <strong>FBR Taxpayer Portal → Digital Invoicing → API Token</strong>.
+          You can also add/update it later from your profile.
+        </div>
+      </div>
+
+      <div class="d-grid">
+        <button type="submit" class="btn btn-primary btn-lg fw-semibold">
+          <i class="bi bi-person-check me-2"></i>Create Account
+        </button>
+      </div>
+    </form>
+
+    <hr class="my-4">
+    <p class="text-center text-muted small mb-0">
+      Already have an account?
+      <a href="{{ url_for('login_page') }}" class="fw-semibold text-decoration-none"
+         style="color:#1a6b3c;">Sign in &rarr;</a>
+    </p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+/* Client-side password-match check */
+document.querySelector('form').addEventListener('submit', function(e) {
+  const pw  = document.getElementById('password').value;
+  const cpw = document.getElementById('confirm_pw').value;
+  if (pw !== cpw) {
+    e.preventDefault();
+    alert('Passwords do not match. Please re-enter.');
+    document.getElementById('confirm_pw').focus();
+  }
+});
+</script>
+{% endblock %}

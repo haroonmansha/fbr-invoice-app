@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}My Profile — FBR Invoice{% endblock %}
+{% block breadcrumb %}Profile{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+
+  <!-- ── Profile Card ─────────────────────────────── -->
+  <div class="col-lg-4">
+    <div class="card text-center">
+      <div class="card-body py-4">
+        <div class="rounded-circle d-inline-flex align-items-center justify-content-center mb-3"
+             style="width:80px;height:80px;background:#d1fae5;">
+          <i class="bi bi-person-fill text-success" style="font-size:2.5rem;"></i>
+        </div>
+        <h5 class="fw-bold mb-0">{{ user.seller_name or user.email }}</h5>
+        <p class="text-muted small mt-1">{{ user.email }}</p>
+        <span class="badge {{ 'bg-warning text-dark' if user.fbr_env=='sandbox' else 'bg-danger' }}">
+          {{ '🧪 Sandbox' if user.fbr_env=='sandbox' else '🚀 Production' }}
+        </span>
+        <hr>
+        <div class="text-start small">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <i class="bi bi-card-text text-muted"></i>
+            <span><strong>NTN:</strong> {{ user.seller_ntn or '—' }}</span>
+          </div>
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <i class="bi bi-geo-alt text-muted"></i>
+            <span><strong>Province:</strong> {{ user.seller_province or '—' }}</span>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-house text-muted"></i>
+            <span><strong>Address:</strong> {{ user.seller_address or '—' }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Links -->
+    <div class="card mt-3">
+      <div class="card-body">
+        <h6 class="fw-semibold mb-3">Quick Links</h6>
+        <div class="list-group list-group-flush">
+          <a href="{{ url_for('change_password') }}" class="list-group-item list-group-item-action py-2">
+            <i class="bi bi-lock me-2 text-muted"></i>Change Password
+          </a>
+          <a href="{{ url_for('invoices_page') }}" class="list-group-item list-group-item-action py-2">
+            <i class="bi bi-file-earmark-text me-2 text-muted"></i>My Invoices
+          </a>
+          <a href="{{ url_for('buyers_page') }}" class="list-group-item list-group-item-action py-2">
+            <i class="bi bi-people me-2 text-muted"></i>My Buyers
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Edit Form ─────────────────────────────────── -->
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header">
+        <i class="bi bi-pencil-square me-2"></i>Edit Profile
+      </div>
+      <div class="card-body">
+
+        <!-- Save feedback -->
+        <div id="saveMsg" class="d-none"></div>
+
+        <!-- Seller Info -->
+        <h6 class="text-uppercase text-muted fw-semibold small mb-3">
+          <i class="bi bi-building me-1"></i>Business Information
+        </h6>
+        <div class="row g-3 mb-4">
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Business Name</label>
+            <input type="text" id="sellerName" class="form-control"
+                   value="{{ user.seller_name or '' }}"
+                   placeholder="Your company name">
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Seller NTN</label>
+            <input type="text" class="form-control bg-light"
+                   value="{{ user.seller_ntn or '' }}" readonly
+                   title="Contact admin to change NTN">
+            <div class="form-text">Contact admin to change NTN.</div>
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Province</label>
+            <select id="sellerProvince" class="form-select">
+              {% for p in ['Punjab','Sindh','KPK','Balochistan','Islamabad','AJK','GB','FATA'] %}
+              <option value="{{ p }}" {{ 'selected' if user.seller_province==p }}>{{ p }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Address</label>
+            <input type="text" id="sellerAddress" class="form-control"
+                   value="{{ user.seller_address or '' }}"
+                   placeholder="Street, City, Pakistan">
+          </div>
+        </div>
+
+        <!-- Contact Info -->
+        <h6 class="text-uppercase text-muted fw-semibold small mb-3">
+          <i class="bi bi-telephone me-1"></i>Contact Details
+        </h6>
+        <div class="row g-3 mb-4">
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Contact Email</label>
+            <input type="email" id="contactEmail" class="form-control"
+                   value="{{ user.contact_email or user.email }}"
+                   placeholder="contact@company.pk">
+          </div>
+          <div class="col-sm-6">
+            <label class="form-label fw-semibold">Contact Phone</label>
+            <input type="tel" id="contactPhone" class="form-control"
+                   value="{{ user.contact_phone or '' }}"
+                   placeholder="+92 XXX XXXXXXX">
+          </div>
+        </div>
+
+        <!-- FBR Token -->
+        <h6 class="text-uppercase text-muted fw-semibold small mb-3">
+          <i class="bi bi-key me-1"></i>FBR API Token
+        </h6>
+        <div class="mb-4">
+          <label class="form-label fw-semibold">Bearer Token</label>
+          <div class="input-group">
+            <textarea id="fbrToken" class="form-control" rows="2"
+                      placeholder="Your FBR API token">{{ user.fbr_token or '' }}</textarea>
+          </div>
+          <div class="form-text">
+            Get your token from
+            <strong>FBR Taxpayer Portal → Digital Invoicing → Token Management</strong>.
+          </div>
+        </div>
+
+        <div class="d-flex gap-2 justify-content-end">
+          <button type="button" class="btn btn-primary" id="saveProfileBtn">
+            <i class="bi bi-save me-2"></i>Save Changes
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- FBR Token update (separate save) -->
+    <div class="card mt-3">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h6 class="fw-semibold mb-0"><i class="bi bi-key me-2 text-warning"></i>Update FBR Token</h6>
+        </div>
+        <p class="text-muted small mb-3">
+          Your FBR token is stored securely on the server. It is never exposed to the browser.
+        </p>
+        <div class="d-flex gap-2">
+          <textarea id="newFbrToken" class="form-control form-control-sm" rows="2"
+                    placeholder="Paste new FBR API token here">{{ user.fbr_token or '' }}</textarea>
+          <button class="btn btn-outline-warning btn-sm align-self-start" id="saveTokenBtn"
+                  style="white-space:nowrap;">
+            <i class="bi bi-save me-1"></i>Update Token
+          </button>
+        </div>
+        <div id="tokenMsg" class="d-none mt-2 small"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// ── Save profile ───────────────────────────────────────────
+document.getElementById('saveProfileBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('saveProfileBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
+
+  const body = {
+    seller_name:     document.getElementById('sellerName').value.trim(),
+    seller_province: document.getElementById('sellerProvince').value,
+    seller_address:  document.getElementById('sellerAddress').value.trim(),
+    contact_email:   document.getElementById('contactEmail').value.trim(),
+    contact_phone:   document.getElementById('contactPhone').value.trim(),
+  };
+
+  try {
+    const res  = await fetch('/profile', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    const msg  = document.getElementById('saveMsg');
+    if (data.ok) {
+      msg.className = 'alert alert-success small py-2';
+      msg.textContent = '✅ Profile saved successfully!';
+    } else {
+      msg.className = 'alert alert-danger small py-2';
+      msg.textContent = `❌ ${data.error || 'Save failed.'}`;
+    }
+    msg.classList.remove('d-none');
+    setTimeout(()=>msg.classList.add('d-none'), 4000);
+  } catch(e) {
+    alert('Network error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-save me-2"></i>Save Changes';
+  }
+});
+
+// ── Update FBR token ───────────────────────────────────────
+document.getElementById('saveTokenBtn').addEventListener('click', async () => {
+  const newToken = document.getElementById('newFbrToken').value.trim();
+  if (!newToken) { alert('Token cannot be empty.'); return; }
+
+  const res  = await fetch('/profile', {
+    method:  'POST',
+    headers: {'Content-Type':'application/json'},
+    body:    JSON.stringify({ fbr_token: newToken })
+  });
+  const data = await res.json();
+  const msg  = document.getElementById('tokenMsg');
+  if (data.ok) {
+    msg.className = 'text-success';
+    msg.textContent = '✅ Token updated!';
+  } else {
+    msg.className = 'text-danger';
+    msg.textContent = '❌ Failed to update token.';
+  }
+  msg.classList.remove('d-none');
+  setTimeout(()=>msg.classList.add('d-none'), 4000);
+});
+</script>
+{% endblock %}
