@@ -23,6 +23,22 @@ panel — all in a clean Bootstrap 5 UI.
 
 ---
 
+## 🔐 Default Login Credentials
+
+> **These are the built-in credentials used when no environment variables are set.**
+> Change them before deploying to production (see [Environment Variables](#-environment-variables)).
+
+| Role | Email | Password |
+|---|---|---|
+| **Super Admin** | `admin@fbr.local` | `Admin@12345` |
+| Regular users | *(sign up via `/signup`)* | *(chosen at signup)* |
+
+The Super Admin account is **not** stored in the database — it is authenticated directly
+from the `SUPER_ADMIN_EMAIL` and `SUPER_ADMIN_PASSWORD` environment variables (or the
+defaults above when those variables are not set).
+
+---
+
 ## 🚀 Quick Start (Local Development)
 
 ### 1. Clone the repository
